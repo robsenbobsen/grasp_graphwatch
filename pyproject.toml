@@ -1,0 +1,141 @@
+[project]
+name = "grasp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "torch-geometric>=2.6",
+    "records==0.6.0",
+    "psycopg2-binary==2.9.11",
+    "python-dotenv==1.2.1",
+    "PyYAML==6.0.3",
+    "pandas==2.3.3",
+    "scikit-learn==1.8.0",
+    "matplotlib==3.10.8",
+    "gdown==5.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "pytest-cov==7.0.0",
+]
+
+# One of these MUST be selected at sync time, e.g. `uv sync --extra cu126`.
+# `scripts/install.sh` picks the right one automatically by inspecting
+# `nvidia-smi`, so `./scripts/install.sh` is the easiest way in — no need to
+# know your CUDA version or pass a flag yourself.
+#
+# torch itself is repeated in every extra (rather than pinned once in
+# `dependencies`) because uv only honors an extra-conditioned source (see
+# `tool.uv.sources.torch` below) for a package actually listed under that
+# extra. The torch-scatter/sparse/cluster/spline-conv pins carry the exact
+# PyG wheel build (its "+ptXXcuYYY"/"+ptXXcpu" local version) so the four
+# variants can safely coexist in `find-links` below without uv guessing
+# wrong and grabbing e.g. the cu130 build on a CPU-only machine.
+[project.optional-dependencies]
+cpu = [
+    "torch==2.9.1",
+    # PyG only publishes Linux wheels tagged with the "+pt29cpu" local
+    # version; its macOS wheels (universal2, ABI-compatible across the 2.9.x
+    # series) are untagged and were last built against 2.9.0, so macOS must
+    # resolve to the plain version instead.
+    "torch-scatter==2.1.2+pt29cpu; sys_platform == 'linux'",
+    "torch-sparse==0.6.18+pt29cpu; sys_platform == 'linux'",
+    "torch-cluster==1.6.3+pt29cpu; sys_platform == 'linux'",
+    "torch-spline-conv==1.2.2+pt29cpu; sys_platform == 'linux'",
+    "torch-scatter==2.1.2; sys_platform == 'darwin'",
+    "torch-sparse==0.6.18; sys_platform == 'darwin'",
+    "torch-cluster==1.6.3; sys_platform == 'darwin'",
+    "torch-spline-conv==1.2.2; sys_platform == 'darwin'",
+]
+cu126 = [
+    "torch==2.9.1; sys_platform == 'linux'",
+    "torch-scatter==2.1.2+pt29cu126; sys_platform == 'linux'",
+    "torch-sparse==0.6.18+pt29cu126; sys_platform == 'linux'",
+    "torch-cluster==1.6.3+pt29cu126; sys_platform == 'linux'",
+    "torch-spline-conv==1.2.2+pt29cu126; sys_platform == 'linux'",
+]
+cu128 = [
+    "torch==2.9.1; sys_platform == 'linux'",
+    "torch-scatter==2.1.2+pt29cu128; sys_platform == 'linux'",
+    "torch-sparse==0.6.18+pt29cu128; sys_platform == 'linux'",
+    "torch-cluster==1.6.3+pt29cu128; sys_platform == 'linux'",
+    "torch-spline-conv==1.2.2+pt29cu128; sys_platform == 'linux'",
+]
+cu130 = [
+    "torch==2.9.1; sys_platform == 'linux'",
+    "torch-scatter==2.1.2+pt29cu130; sys_platform == 'linux'",
+    "torch-sparse==0.6.18+pt29cu130; sys_platform == 'linux'",
+    "torch-cluster==1.6.3+pt29cu130; sys_platform == 'linux'",
+    "torch-spline-conv==1.2.2+pt29cu130; sys_platform == 'linux'",
+]
+
+[tool.uv]
+# cpu/cu126/cu128/cu130 are alternative backends, not additive features —
+# selecting more than one at once would mix incompatible torch builds.
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu126" },
+        { extra = "cu128" },
+        { extra = "cu130" },
+    ],
+]
+
+# Flat wheel pages — the torch version in each MUST match the pin above.
+# Listing all four is safe: each extra above pins the exact local version
+# string, so uv doesn't have to (mis)guess between them.
+find-links = [
+    "https://data.pyg.org/whl/torch-2.9.1+cpu.html",
+    "https://data.pyg.org/whl/torch-2.9.1+cu126.html",
+    "https://data.pyg.org/whl/torch-2.9.1+cu128.html",
+    "https://data.pyg.org/whl/torch-2.9.1+cu130.html",
+]
+
+# Fail loudly if a wheel is missing instead of silently trying to compile
+# the sdist from PyPI (which is what produces the 40-minute hangs).
+no-build-package = ["torch-scatter", "torch-sparse", "torch-cluster", "torch-spline-conv"]
+
+# Restrict the lock to the platform your users are actually on.
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin'",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[project.scripts]
+check-install = "scripts.check_install:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scripts"]

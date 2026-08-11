@@ -11,33 +11,58 @@ git clone <repo-url>
 cd grasp
 ```
 
-2. Create a virtual environment (Python 3.10+ recommended):
+2. Install dependencies.
+
+### Option A: uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) manages the virtualenv for you and locks
+exact versions. It also picks the right `torch`/`torch-geometric` build (CPU,
+or a matching CUDA version) automatically, so you don't need to know your
+CUDA version or select a wheel by hand.
+
+[Install uv](https://docs.astral.sh/uv/getting-started/installation/) if you
+don't have it, then:
+
+```bash
+./scripts/install.sh
+```
+
+This inspects `nvidia-smi` and syncs the matching backend — equivalent to
+`uv sync --extra <cpu|cu126|cu128|cu130>`. Pass `--extra` yourself to
+override the detected choice, e.g. `./scripts/install.sh --extra cu128`.
+
+Activate the environment with `source .venv/bin/activate`, or prefix
+commands with `uv run` (e.g. `uv run python main.py ...`). Verify the
+install with:
+
+```bash
+uv run check-install
+```
+
+### Option B: pip
+
+Unlike uv, pip won't pick a CUDA build for you — choose `cpu`, `cu126`,
+`cu128`, or `cu130` based on your setup (see
+[PyTorch's install matrix](https://pytorch.org/get-started/locally/)) and use
+it consistently in the extra, `--extra-index-url`, and `-f` URL below (shown
+here for `cpu`):
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+
+pip install -e ".[cpu]" \
+  --extra-index-url https://download.pytorch.org/whl/cpu \
+  -f https://data.pyg.org/whl/torch-2.9.1+cpu.html
 ```
 
-3. Install core dependencies:
+For a CUDA build, swap `cpu` for `cu126`/`cu128`/`cu130` in all three
+places. Dev tooling (pytest) isn't pulled in by either of the above; add it
+with:
 
 ```bash
-pip install -r requirements.txt
-```
-
-4. Install PyTorch and PyTorch Geometric for your platform (choose the right wheel for your CUDA/CPU setup, see https://pytorch.org/get-started/locally/ and https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html):
-
-```bash
-pip install torch torchvision torchaudio  # pick version/build matching your CUDA
-pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv  
-```
-
-Example:
-```bash
-pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
-pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.8.0+cu129.html
+pip install pytest==9.0.2 pytest-cov==7.0.0
 ```
 
 ### Data

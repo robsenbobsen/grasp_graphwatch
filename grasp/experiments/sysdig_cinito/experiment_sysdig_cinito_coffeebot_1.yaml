@@ -1,6 +1,6 @@
 dataset:
   name: sysdig
-experiment_prefix: sysdig_cinito_coffeebot_1
+experiment_prefix: sysdig_cinito_coffeebot_2
 storage:
   graph_root_dir: ./data/graphs/sysdig_coffebot
 graph_management:
@@ -8,14 +8,14 @@ graph_management:
 ground_truth:
   base_dir: ./ground_truth/atlasv2_edr
 times:
-  train_start: ["2026-08-03 13:00:00"]
+  train_start: ["2026-09-08 17:00:00"] # 2026-09-08 17:17:57.223555635 UTC
   # train_start: ["2026-08-17 00:00:00"]
   # train_end: ["2026-06-11 7:59:59"] # 2026-06-11 12:16:48
-  train_end: ["2026-08-03 13:29:59"] # 2026-06-11 12:16:48
-  test_start: ["2026-08-03 13:30:00"]
-  test_end: ["2026-08-03 13:59:59"]
+  train_end: ["2026-09-09 08:59:59"] # 2026-06-11 12:16:48
+  test_start: ["2026-09-09 09:00:00"]
+  test_end: ["2026-09-09 10:59:59"] # 2026-09-09 10:39:45.086173596 UTC
   context_size: 15 # in minutes
-  step_size: 5 # in minutes 
+  step_size: 15 # in minutes 
 location_transformer:
   max_location_length: 100 
   hidden_dim: 16

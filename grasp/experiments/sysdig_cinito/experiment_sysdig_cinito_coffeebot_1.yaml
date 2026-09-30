@@ -1,6 +1,6 @@
 dataset:
   name: sysdig
-experiment_prefix: sysdig_cinito_coffeebot_2
+experiment_prefix: sysdig_cinito_coffeebot_1
 storage:
   graph_root_dir: ./data/graphs/sysdig_coffebot
 graph_management:

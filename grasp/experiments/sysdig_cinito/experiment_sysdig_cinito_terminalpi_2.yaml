@@ -1,0 +1,50 @@
+dataset:
+  name: sysdig
+experiment_prefix: sysdig_cinito_terminalpi_2
+storage:
+  graph_root_dir: ./data/graphs/sysdig_terminalpi
+graph_management:
+  force_reload: false
+ground_truth:
+  base_dir: ./ground_truth/atlasv2_edr
+times:
+  train_start: ["2026-09-09 04:30:00"] #2026-09-09 04:48:21.733390987 UTC
+  # train_start: ["2026-08-17 00:00:00"]
+  # train_end: ["2026-06-11 7:59:59"] # 2026-06-11 12:16:48
+  train_end: ["2026-09-09 08:59:59"] # 2026-06-11 12:16:48
+  test_start: ["2026-09-09 09:00:00"]
+  test_end: ["2026-09-09 10:59:59"] # 2026-09-09 10:34:39.440700112 UTC
+  context_size: 15 # in minutes
+  step_size: 15 # in minutes 
+location_transformer:
+  max_location_length: 100 
+  hidden_dim: 16
+  embedding_dim: 8 
+  num_layers: 2
+  nhead: 4
+  num_epochs: 4
+  patience: 3
+  batch_size: 256
+  positional_encoding_max_len: 5000
+  positional_encoding_div_term_hyperparam: 10000.0
+  learning_rate: 0.001
+  device: cuda:1
+detection:
+  num_neighbors: [-1,-1]
+  batch_size: 32
+  epochs: 4
+  device: cuda:1
+  learning_rate: 0.01
+  hidden_dim: 128
+  heads: 4
+  num_layers: 2
+  dropout: 0.1
+  weight_decay: 0.0001
+  scheduler_factor: 0.5
+  scheduler_patience: 5
+  scheduler_mode: min
+  shuffle_train_paths: true
+  shuffle_train_batches: true
+attack_windows_for_visualization:
+  - start_time: "2026-06-23 12:00:00"
+    end_time: "2026-06-23 12:30:00"

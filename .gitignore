@@ -19,7 +19,7 @@ graphwatch_data_pipeline/sysdig/output/*
 graphwatch_data_pipeline/sysdig/.env_upload
 graphwatch_data_pipeline/sysdig/.env
 graphwatch_data_pipeline/setup_db/.env
-graphwatch_data_pipeline/setup_db/.postgres_data_grasp_graphwatch/
+graphwatch_data_pipeline/setup_db/.postgres_data_grasp_graphwatch/ 
 pids_runs/*
 graphwatch_data_pipeline/sysdig/backup_data/
 bachup_data/*

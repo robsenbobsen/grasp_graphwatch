@@ -15,6 +15,7 @@ Output:
 
 from __future__ import annotations
 
+import argparse
 import shutil
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -29,10 +30,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 INPUT_DIR = BASE_DIR / "output" / "edges_and_nodes"
 OUTPUT_DIR = BASE_DIR / "output" / "tables"
-EVENT_DIR = OUTPUT_DIR / "event_table"
-
-NODES_FILE = INPUT_DIR / "nodes.csv"
-EDGES_FILE = INPUT_DIR / "edges.csv"
+EVENT_DIRNAME = "event_table"
 
 
 # Operations produced by parse_json_into_edges_and_nodes.py (see EDGE_FIELDNAMES
@@ -300,9 +298,18 @@ def _parse_socket_name(socket_name) -> tuple[str, str, str, str]:
 # ------------------------------
 
 
-def _prepare_node_frame() -> pd.DataFrame:
-    """Load nodes.csv and create normalized node metadata."""
-    node_df = _read_csv_required(NODES_FILE)
+def _prepare_node_frame(
+    nodes_file: Path,
+    existing_index: dict[str, int] | None = None,
+    next_index: int = 0,
+) -> pd.DataFrame:
+    """Load nodes.csv and create normalized node metadata.
+
+    Nodes in existing_index (node id -> index_id already in the DB) keep their index_id and
+    are marked is_new=False; new nodes are numbered from next_index on.
+    """
+    existing_index = existing_index or {}
+    node_df = _read_csv_required(nodes_file)
     node_df = _ensure_columns(node_df, NODE_INPUT_COLUMNS)
 
     print(f"loaded {len(node_df)} raw nodes")
@@ -317,11 +324,13 @@ def _prepare_node_frame() -> pd.DataFrame:
     node_df["node_uuid"] = node_df["id"]
     node_df["hash_id"] = node_df["id"]
 
-    node_df["index_id"] = pd.RangeIndex(
-        start=0,
-        stop=len(node_df),
-        step=1,
-    )
+    node_df["is_new"] = ~node_df["id"].isin(set(existing_index))
+    node_df["index_id"] = node_df["id"].map(existing_index).astype("Int64")
+    num_new = int(node_df["is_new"].sum())
+    node_df.loc[node_df["is_new"], "index_id"] = list(range(next_index, next_index + num_new))
+    node_df["index_id"] = node_df["index_id"].astype("int64")
+    if existing_index:
+        print(f"{len(node_df) - num_new} nodes already known, {num_new} new nodes")
 
     node_df["type_norm"] = node_df["type"].fillna("").str.lower().str.strip()
 
@@ -358,7 +367,7 @@ def _prepare_node_frame() -> pd.DataFrame:
     return node_df
 
 
-def _build_subject_node_table(node_df: pd.DataFrame) -> None:
+def _build_subject_node_table(node_df: pd.DataFrame, output_dir: Path) -> None:
     """Build process / subject table."""
     subject_df = node_df[node_df["type_norm"].eq("process")].copy()
 
@@ -371,12 +380,12 @@ def _build_subject_node_table(node_df: pd.DataFrame) -> None:
 
     _write_table(
         subject_df,
-        OUTPUT_DIR / "subject_node_table.csv",
+        output_dir / "subject_node_table.csv",
         SUBJECT_COLUMNS,
     )
 
 
-def _build_file_node_table(node_df: pd.DataFrame) -> None:
+def _build_file_node_table(node_df: pd.DataFrame, output_dir: Path) -> None:
     """Build file node table."""
     file_df = node_df[node_df["type_norm"].eq("file")].copy()
 
@@ -384,12 +393,12 @@ def _build_file_node_table(node_df: pd.DataFrame) -> None:
 
     _write_table(
         file_df,
-        OUTPUT_DIR / "file_node_table.csv",
+        output_dir / "file_node_table.csv",
         FILE_COLUMNS,
     )
 
 
-def _build_netflow_node_table(node_df: pd.DataFrame) -> None:
+def _build_netflow_node_table(node_df: pd.DataFrame, output_dir: Path) -> None:
     """Build network flow / socket table."""
     netflow_df = node_df[node_df["type_norm"].eq("socket")].copy()
 
@@ -401,7 +410,7 @@ def _build_netflow_node_table(node_df: pd.DataFrame) -> None:
 
         _write_table(
             netflow_df,
-            OUTPUT_DIR / "netflow_node_table.csv",
+            output_dir / "netflow_node_table.csv",
             NETFLOW_COLUMNS,
         )
         return
@@ -415,15 +424,17 @@ def _build_netflow_node_table(node_df: pd.DataFrame) -> None:
 
     _write_table(
         netflow_df,
-        OUTPUT_DIR / "netflow_node_table.csv",
+        output_dir / "netflow_node_table.csv",
         NETFLOW_COLUMNS,
     )
 
 
-def _build_node_tables(node_df: pd.DataFrame) -> None:
-    _build_subject_node_table(node_df)
-    _build_file_node_table(node_df)
-    _build_netflow_node_table(node_df)
+def _build_node_tables(node_df: pd.DataFrame, output_dir: Path) -> None:
+    """Write only nodes that are not in the DB yet."""
+    new_nodes = node_df[node_df["is_new"]]
+    _build_subject_node_table(new_nodes, output_dir)
+    _build_file_node_table(new_nodes, output_dir)
+    _build_netflow_node_table(new_nodes, output_dir)
 
 
 def _build_vertex_index_map(node_df: pd.DataFrame) -> pd.Series:
@@ -461,9 +472,9 @@ def _make_event_uuid(edge_df: pd.DataFrame) -> pd.Series:
     return base_uuid.where(valid_base, fallback_uuid)
 
 
-def _prepare_edge_frame() -> pd.DataFrame:
+def _prepare_edge_frame(edges_file: Path) -> pd.DataFrame:
     """Load and clean edges.csv."""
-    edge_df = _read_csv_required(EDGES_FILE)
+    edge_df = _read_csv_required(edges_file)
     edge_df = _ensure_columns(edge_df, EDGE_INPUT_COLUMNS)
 
     print(f"loaded {len(edge_df)} raw edges")
@@ -485,9 +496,11 @@ def _prepare_edge_frame() -> pd.DataFrame:
     return edge_df
 
 
-def _build_event_table(vertex_index_map: pd.Series) -> None:
-    """Build the normalized event table."""
-    edge_df = _prepare_edge_frame()
+def _build_event_table(
+    vertex_index_map: pd.Series, edges_file: Path, event_dir: Path, first_event_id: int = 0
+) -> dict:
+    """Build the normalized event table; returns event count and time range (ns)."""
+    edge_df = _prepare_edge_frame(edges_file)
 
     edge_df["src_node"] = edge_df["src"]
     edge_df["dst_node"] = edge_df["dst"]
@@ -516,24 +529,31 @@ def _build_event_table(vertex_index_map: pd.Series) -> None:
     ).astype("Int64")
 
     edge_df["_id"] = pd.RangeIndex(
-        start=0,
-        stop=len(edge_df),
+        start=first_event_id,
+        stop=first_event_id + len(edge_df),
         step=1,
     )
 
     event_df = edge_df.loc[:, EVENT_COLUMNS].copy()
 
-    EVENT_DIR.mkdir(parents=True, exist_ok=True)
+    event_dir.mkdir(parents=True, exist_ok=True)
 
     # Remove stale event batches from previous runs.
-    for old_batch in EVENT_DIR.glob("event_table_batch_*.csv"):
+    for old_batch in event_dir.glob("event_table_batch_*.csv"):
         old_batch.unlink()
 
     _write_table(
         event_df,
-        EVENT_DIR / "event_table_batch_00000.csv",
+        event_dir / "event_table_batch_00000.csv",
         EVENT_COLUMNS,
     )
+
+    timestamps = event_df["timestamp_rec"].dropna()
+    return {
+        "events": len(event_df),
+        "min_timestamp_ns": int(timestamps.min()) if len(timestamps) else None,
+        "max_timestamp_ns": int(timestamps.max()) if len(timestamps) else None,
+    }
 
 
 # ------------------------------
@@ -541,16 +561,14 @@ def _build_event_table(vertex_index_map: pd.Series) -> None:
 # ------------------------------
 
 
-def _run_sanity_checks() -> None:
+def _run_sanity_checks(input_dir: Path) -> None:
     """Check that required input files exist before doing work."""
-    if not INPUT_DIR.exists():
-        raise FileNotFoundError(f"Input directory not found: {INPUT_DIR}")
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    if not NODES_FILE.exists():
-        raise FileNotFoundError(f"Missing nodes file: {NODES_FILE}")
-
-    if not EDGES_FILE.exists():
-        raise FileNotFoundError(f"Missing edges file: {EDGES_FILE}")
+    for name in ("nodes.csv", "edges.csv"):
+        if not (input_dir / name).exists():
+            raise FileNotFoundError(f"Missing {name}: {input_dir / name}")
 
 
 # ------------------------------
@@ -558,25 +576,43 @@ def _run_sanity_checks() -> None:
 # ------------------------------
 
 
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def build_tables(
+    input_dir: Path = INPUT_DIR,
+    output_dir: Path = OUTPUT_DIR,
+    existing_index: dict[str, int] | None = None,
+    next_index: int = 0,
+    first_event_id: int = 0,
+) -> dict:
+    """Write the node/event table CSVs; continues index ids for incremental batches."""
+    input_dir, output_dir = Path(input_dir), Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"input nodes: {NODES_FILE}")
-    print(f"input edges: {EDGES_FILE}")
-    print(f"output dir:  {OUTPUT_DIR}")
+    print(f"input dir:   {input_dir}")
+    print(f"output dir:  {output_dir}")
 
-    _run_sanity_checks()
+    _run_sanity_checks(input_dir)
 
-    print(f"[*] Clearing {OUTPUT_DIR} before parsing...")
-    _clear_directory(OUTPUT_DIR)
+    print(f"[*] Clearing {output_dir} before parsing...")
+    _clear_directory(output_dir)
 
-    node_df = _prepare_node_frame()
+    node_df = _prepare_node_frame(input_dir / "nodes.csv", existing_index, next_index)
     vertex_index_map = _build_vertex_index_map(node_df)
 
-    _build_node_tables(node_df)
-    _build_event_table(vertex_index_map)
+    _build_node_tables(node_df, output_dir)
+    summary = _build_event_table(
+        vertex_index_map, input_dir / "edges.csv", output_dir / EVENT_DIRNAME, first_event_id
+    )
 
     print("[*] Normalized graph tables exported")
+    return {"new_nodes": int(node_df["is_new"].sum()), **summary}
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="Build PIDSMaker-style tables from nodes/edges")
+    parser.add_argument("--input-dir", type=Path, default=INPUT_DIR, help="nodes.csv/edges.csv dir")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR, help="Table CSV output dir")
+    args = parser.parse_args(argv)
+    build_tables(args.input_dir, args.output_dir)
 
 
 if __name__ == "__main__":

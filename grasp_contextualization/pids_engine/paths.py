@@ -21,6 +21,8 @@ def _resolve_artifact(c: Config, subdir: str, suffix: str) -> Path:
 
 
 def report_path(c: Config) -> Path:
+    if c.inference_run:
+        return c.inference_run / "detailed_report.json"
     return _resolve_artifact(c, "reports", "detailed_report.json")
 
 
@@ -29,10 +31,14 @@ def graph_storage_path(c: Config) -> Path:
 
 
 def cls_metrics_path(c: Config) -> Path:
+    if c.model_dir:
+        return c.model_dir / "train_metrics.json"  # missing for older bundles: no metrics
     return _resolve_artifact(c, "classification_storage", "cls_storage_metrics.json")
 
 
 def cls_predictions_path(c: Config) -> Path:
+    if c.inference_run:
+        return c.inference_run / "classification.pt"
     return _resolve_artifact(c, "classification_storage", "test_cls_storage.pt")
 
 

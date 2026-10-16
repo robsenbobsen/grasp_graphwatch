@@ -29,6 +29,23 @@ either tool against a different checkout.
 
 ## 1. Run the analysis engine
 
+### For an inference run of the REST API / `infer.py`
+
+Runs of the REST API and `infer.py` are stored as `data/inference/<run_id>/` with their model
+in `data/models/<model_id>/`. The engine reads everything it needs from there:
+
+```bash
+python grasp_contextualization/pids_analysis_engine.py \
+  --inference-run data/inference/<run_id> \
+  --output-dir pids_runs/<run_id>_report
+```
+
+Dataset, window sizes, anomalies, classifier confidences, training graphs (comparison samples)
+and command mapping come from the run and its model; the other flags below still apply.
+In the workbench, the same is a dropdown (see 2.).
+
+### For a `main.py` experiment
+
 Run against a completed GRASP experiment (i.e. after `python main.py
 --experiment-config ...` has produced a `..._detailed_report.json` under
 `data/<dataset>/reports/` — see [graphwatch_data_pipeline/README.md](../graphwatch_data_pipeline/README.md)
@@ -73,7 +90,7 @@ streamlit run grasp_contextualization/pids_workbench_app.py
 
 Open the printed local URL in a browser. Pages, in the sidebar:
 
-- **Create report** — runs the engine from the UI (fills in the same flags as above) instead of the CLI. Its form defaults to a smaller candidate pool (5 per label) and no anomaly cap, geared towards quick, interactive runs rather than the CLI's defaults.
+- **Create report** — runs the engine from the UI instead of the CLI. Source *Inference runs* (default) lists every run in `data/inference` (time range, anomalies, ground truth, and whether a report exists already); pick one and press *Run analysis*. Source *Experiment runs* is the `main.py` flow (fills in the same flags as above). Its form defaults to a smaller candidate pool (5 per label) and no anomaly cap, geared towards quick, interactive runs rather than the CLI's defaults.
 - **Overview** — aggregate metrics across all anomalies: conclusions, per-view score distributions, ablation summary, per-anomaly classifier quality (learning quality), prediction confidence, and any failures.
 - **Context View** — the analyst's decision view for one anomaly at a time: TARGET vs. a predicted-label training sample vs. a true-label training sample, with side-by-side graphs, event sequences, tables, and diffs. Both samples default to the closest match but each has its own dropdown to pick a different ranked candidate instead. Also shows the target node's own raw classifier confidence (top-3). This is the primary page for deciding false positive vs. real anomaly. If one side has no training samples at all (most commonly the true-label side, when that true class was never seen in training), the page degrades gracefully — it shows whatever side *is* available instead of failing outright, and only errors if neither side has anything to compare against.
 

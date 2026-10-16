@@ -14,7 +14,7 @@ from torch_geometric.loader import NeighborLoader
 
 import grasp.config as grasp_config
 from grasp.utils.graph_helpers import clean_graph_attributes_for_neighborloader, load_graph_data
-from grasp_contextualization.shared import neighbor_fanout
+from grasp_contextualization.shared import local_path, neighbor_fanout
 
 # -----------------------------------------------------------------------------
 # Operation mapping and raw graph helpers
@@ -87,6 +87,8 @@ def resolve_path(path: str, project_root: str) -> str:
     p = Path(path).expanduser()
     if p.exists():
         return str(p)
+    if local_path(p).exists():  # container path of an API run, e.g. /detection_service/data/...
+        return str(local_path(p))
     candidates = [Path(project_root) / p, Path.cwd() / p]
     candidates.extend(parent / p for parent in Path(__file__).resolve().parents)
     for candidate in candidates:

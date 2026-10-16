@@ -1,13 +1,14 @@
 # Setup with Docker Compose (GPU)
 
-This guide runs the whole GRASP repository in Docker: PostgreSQL, GRASP training/detection,
-the contextualization workbench and the sysdig data pipeline. Everything uses the `doc-comp`
+This guide runs the whole GRASP repository in Docker: PostgreSQL, the detection REST API
+(training and inference), the contextualization workbench and the sysdig data pipeline. Everything uses the `doc-comp`
 prefix (project `doc-comp`) and runs on NVIDIA GPUs.
 
 | Service | Purpose |
 | --- | --- |
-| `doc-comp_postgres` | PostgreSQL 17, data in volume `doc-comp_postgres_data`, host port `8888` |
-| `doc-comp_grasp` | runs `main.py` with the experiment in `GRASP_EXPERIMENT_CONFIG` |
+| `doc-comp_postgres` | optional PostgreSQL 17 (profile `db`), volume `doc-comp_postgres_data`, host port `8888` |
+| `doc-comp_detection_api` | REST API on http://localhost:8000 that queues training/inference jobs |
+| `doc-comp_grasp` | runs `main.py` (full pipeline) manually (profile `cli`) |
 | `doc-comp_workbench` | contextualization workbench on http://localhost:8501 |
 | `doc-comp_sysdig_pipeline` | sysdig `.scap` → Postgres pipeline (profile `pipeline`, on demand) |
 
@@ -48,8 +49,13 @@ docker run --rm --gpus all doc-comp_grasp:latest nvidia-smi
 cp .env.docker.example .env.docker
 ```
 
-The defaults connect the detection services to the bundled `doc-comp_postgres`
-(`db_host=doc-comp_postgres`, `db_port=5432`, user/password `grasp`).
+Set `db_user`, `db_password`, `db_host` and `db_port` to the Postgres server holding your data
+(e.g. the remote server). The database itself is chosen per request (`db_name`). To use the
+bundled, initially empty `doc-comp_postgres` instead, keep the example values
+(`db_host=doc-comp_postgres`, `db_port=5432`) and add `--profile db` to `docker compose up`.
+
+Set `GRASP_API_KEY` in `.env.docker` (e.g. `openssl rand -hex 32`); the API refuses to start
+without it, and clients send it as the `X-API-Key` header.
 
 Variables that compose itself reads (set them in your shell or in `.env`):
 
@@ -57,6 +63,7 @@ Variables that compose itself reads (set them in your shell or in `.env`):
 | --- | --- | --- |
 | `POSTGRES_PORT` | `8888` | host port of `doc-comp_postgres` |
 | `WORKBENCH_PORT` | `8501` | host port of the workbench |
+| `API_PORT` | `8000` | host port of the detection API |
 | `GRASP_EXPERIMENT_CONFIG` | `.../cadets_e3_default/experiment_cadets_e3.yaml` | experiment run by `doc-comp_grasp` |
 | `DUMPS_DIR` | `./db_setup/dumps` | directory with PIDSMaker `.dump` files, mounted at `/dumps` |
 | `HOST_UID` / `HOST_GID` | `1000` | user the detection service containers run as |
@@ -78,7 +85,7 @@ The image is `python:3.12.7-slim` with torch 2.8.0 (CUDA 12.9), PyTorch Geometri
 ## 5. Start the database and load data
 
 ```bash
-docker compose up -d doc-comp_postgres
+docker compose --profile db up -d doc-comp_postgres
 ```
 
 ### DARPA datasets (PIDSMaker dumps)
@@ -100,29 +107,112 @@ docker compose exec doc-comp_postgres psql -U grasp -d cadets_e3 \
 
 ### Sysdig captures
 
-Put `.scap` files in `graphwatch_data_pipeline/sysdig/input/sysdig_scaps/`, then:
+Batch (replaces the tables): put `.scap` files in `graphwatch_data_pipeline/sysdig/input/sysdig_scaps/`, then:
 
 ```bash
 docker compose --profile pipeline run --rm doc-comp_sysdig_pipeline
 ```
 
-## 6. Run an experiment
+Live (appends only new capture files; see the
+[sysdig README](graphwatch_data_pipeline/sysdig/README.md)): use the API endpoint
+`POST /jobs/sysdig-ingest` (below), or run it directly:
 
 ```bash
-docker compose run --rm doc-comp_grasp
+docker compose --profile cli run --rm doc-comp_grasp \
+  python graphwatch_data_pipeline/sysdig/ingest.py --scap-dir graphwatch_data_pipeline/sysdig/input/live --db-name sysdig_live
 ```
 
-Another experiment:
+## 6. Detection API
 
 ```bash
-GRASP_EXPERIMENT_CONFIG=grasp/experiments/all_experiments/theia_e3_default/experiment_theia_e3.yaml \
-  docker compose run --rm doc-comp_grasp
+docker compose up -d            # doc-comp_detection_api, doc-comp_workbench (DB from .env.docker)
 ```
 
-Or any command inside the image:
+Interactive docs: http://localhost:8000/docs. All endpoints except `/health` need the API key:
 
 ```bash
-docker compose run --rm doc-comp_grasp python main_pretty_classification_report.py --help
+KEY=$(grep ^GRASP_API_KEY= .env.docker | cut -d= -f2)
+```
+
+**Train and infer in one job.** The model is trained on the training range, then the
+inference range is classified with it. `ground_truth_dir` is optional; with it the result
+also contains the evaluation against the ground truth.
+
+```bash
+curl -s -H "X-API-Key: $KEY" -H "Content-Type: application/json" localhost:8000/jobs/pipeline -d '{
+  "db_name": "cadets_e3",
+  "train_start": "2018-04-02 00:00:00", "train_end": "2018-04-05 23:59:59",
+  "inference_start": "2018-04-06 00:00:00", "inference_end": "2018-04-13 23:59:59",
+  "ground_truth_dir": "ground_truth/cadets_e3"
+}'
+```
+
+**Inference only, with a pretrained model.** Uses the latest model trained on `db_name`
+(or pass `"model_id"`):
+
+```bash
+curl -s -H "X-API-Key: $KEY" -H "Content-Type: application/json" localhost:8000/jobs/inference -d '{
+  "db_name": "cadets_e3",
+  "inference_start": "2018-04-12 00:00:00", "inference_end": "2018-04-12 23:59:59"
+}'
+```
+
+**Live sysdig ingestion.** Appends the capture files in `scap_dir` that were not ingested before
+(and are complete) to `db_name`; with `run_inference` the newly ingested time range is classified
+with the latest model of `db_name` (or `model_id`). Call it periodically:
+
+```bash
+curl -s -H "X-API-Key: $KEY" -H "Content-Type: application/json" localhost:8000/jobs/sysdig-ingest -d '{
+  "db_name": "sysdig_live",
+  "scap_dir": "graphwatch_data_pipeline/sysdig/input/live",
+  "run_inference": true
+}'
+```
+
+Optional: `min_file_age_seconds` (default 60), `max_files`, `model_id`, `ground_truth_dir`,
+`reset` (drop tables and ingestion state first). sysdig models need an `experiment_config`
+when training, e.g. `grasp/experiments/sysdig_spade/experiment_sysdig_1.yaml`.
+
+`POST /jobs/train` only trains (same fields as `/jobs/pipeline` without the inference range).
+Optional fields: `experiment_config` (hyperparameters YAML in the repo; default: the dataset's
+`*_default` experiment) and `force_reload` (rebuild cached graphs from the DB).
+
+Each call returns a job (`"status": "queued"`) with its `id`. Jobs run one at a time:
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /jobs`, `GET /jobs/{id}` | job status: `queued`, `running`, `succeeded`, `failed`, `cancelled` |
+| `GET /jobs/{id}/log?tail=200` | job output |
+| `POST /jobs/{id}/cancel` | cancels a queued or running job |
+| `GET /jobs/{id}/report` | summary: anomalies per window and, with ground truth, detections |
+| `GET /jobs/{id}/anomalies?offset=0&limit=1000` | flagged nodes (uuid, observed vs. predicted command, window) |
+| `GET /jobs/{id}/detailed-report` | full detailed report |
+| `GET /models?db_name=...`, `GET /models/{id}` | trained models with their training range and metrics |
+
+`db_name` is the database on the configured Postgres server; its dataset type is derived from
+the name (`cadets_e3`, `theia_e5`, `sysdig_<anything>`, ...). Times use `YYYY-MM-DD HH:MM:SS`
+in the dataset's time zone, as in the experiment configs.
+
+### Where results are stored
+
+| Path | Content |
+| --- | --- |
+| `data/models/<model_id>/` | trained model: location encoder, command mapping, classifier, clusters, settings |
+| `data/inference/<run_id>/` | `report.json`, `anomalies.json`, `detailed_report.json`, classification, evaluation |
+| `data/graphs/<db_name>/` | cached raw graphs per time window (shared by all models) |
+| `data/api/jobs/` | job state and logs |
+
+### Without the API
+
+The same steps are available on the command line:
+
+```bash
+docker compose --profile cli run --rm doc-comp_grasp python train.py --db-name cadets_e3 \
+  --train-start "2018-04-02 00:00:00" --train-end "2018-04-05 23:59:59"
+docker compose --profile cli run --rm doc-comp_grasp python infer.py --db-name cadets_e3 \
+  --inference-start "2018-04-06 00:00:00" --inference-end "2018-04-13 23:59:59" \
+  --ground-truth-dir ground_truth/cadets_e3
+docker compose --profile cli run --rm doc-comp_grasp     # full pipeline (main.py)
 ```
 
 ## 7. Workbench
@@ -145,7 +235,7 @@ db_port=8888
 ```
 
 and start only the detection services with `--no-deps`, e.g.
-`docker compose run --rm --no-deps doc-comp_grasp`.
+`docker compose up -d --no-deps doc-comp_detection_api`.
 
 ## Useful commands
 

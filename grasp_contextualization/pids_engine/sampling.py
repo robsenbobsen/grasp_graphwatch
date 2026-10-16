@@ -13,7 +13,7 @@ from torch_geometric.loader import NeighborLoader
 
 from grasp.graph import graph_storage
 from grasp.utils.graph_helpers import clean_graph_attributes_for_neighborloader, load_graph_data
-from grasp_contextualization.shared import neighbor_fanout
+from grasp_contextualization.shared import local_path, neighbor_fanout
 
 from .models import Anomaly, Config, ExecWindowStats, Role, SampleRef
 
@@ -24,7 +24,7 @@ def executable_window_stats(gs: graph_storage.GraphStorage) -> defaultdict[str, 
     )
     inv = {int(v): str(k) for k, v in gs.train_subject_cmd_to_id.items()}
     for path in gs.extended_train_data_paths:
-        data: Data = load_graph_data(path)
+        data: Data = load_graph_data(str(local_path(path)))
         subject_indices = data.subject_mask.nonzero(as_tuple=True)[0].detach().cpu().tolist()
         cmd_ids = data.y[data.subject_mask].argmax(dim=1).detach().cpu().tolist()  # type: ignore
         node_ids = [str(data.node_index_id[i]) for i in subject_indices]
@@ -78,7 +78,7 @@ def build_sample_refs(
 
 
 def load_neighbor_batch(ref: SampleRef, c: Config) -> Data:
-    data: Data = load_graph_data(ref.data_path)
+    data: Data = load_graph_data(str(local_path(ref.data_path)))
     _uuids, node_ids, cmd_labels = clean_graph_attributes_for_neighborloader(data)
     node_ids = [str(v) for v in node_ids]  # type: ignore
     cmd_labels = [str(v) for v in cmd_labels]  # type: ignore

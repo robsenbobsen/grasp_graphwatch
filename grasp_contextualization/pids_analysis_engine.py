@@ -32,6 +32,7 @@ Outputs are compatible with the visual workbench:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import random
 import sys
@@ -71,7 +72,12 @@ def run(c: Config) -> None:
     random.seed(c.seed)
     torch.manual_seed(c.seed)
     rng = random.Random(c.seed)
-    gs: graph_storage.GraphStorage = graph_storage.load_graph_storage(str(graph_storage_path(c)))
+    if c.model_dir:
+        from grasp.stages import ModelBundle, train_graph_storage
+
+        gs: graph_storage.GraphStorage = train_graph_storage(ModelBundle(c.model_dir))
+    else:
+        gs = graph_storage.load_graph_storage(str(graph_storage_path(c)))
     anomalies = load_anomalies(c)
     global_metrics, class_metrics = load_learning_metrics(c)
     stats = executable_window_stats(gs)
@@ -104,7 +110,13 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(
         description="Single adaptive PyG metric with visual report schema"
     )
-    parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument(
+        "--inference-run",
+        type=Path,
+        help="Run dir of infer.py / the REST API (data/inference/<run_id>); dataset, sizes, "
+        "model and files are then taken from it and the flags below are not needed",
+    )
+    parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--dataset", default="atlasv2_edr")
     parser.add_argument("--run-id", type=int, default=1)
     parser.add_argument(
@@ -122,6 +134,10 @@ def parse_args() -> Config:
     parser.add_argument("--include-unknown-exec", action="store_true")
     parser.add_argument("--fail-fast", action="store_true")
     args = parser.parse_args()
+    if args.inference_run:
+        return inference_run_config(args)
+    if args.data_dir is None:
+        parser.error("--data-dir is required without --inference-run")
     return Config(
         args.data_dir,
         args.dataset,
@@ -136,6 +152,31 @@ def parse_args() -> Config:
         cast(HopMode, args.hop_mode),
         not args.include_unknown_exec,
         args.fail_fast,
+    )
+
+
+def inference_run_config(args: argparse.Namespace) -> Config:
+    """Config for an inference run: <root>/data/inference/<run> + <root>/data/models/<model>."""
+    run_dir = args.inference_run.resolve()
+    run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    root = run_dir.parents[2]
+    model_dir = root / "data" / "models" / run["model_id"]
+    model = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
+    return Config(
+        data_dir=root,
+        dataset=model["dataset"],
+        experiment_prefix=run["run_id"],
+        context_size=int(model["context_size"]),
+        step_size=int(model["step_size"]),
+        output_dir=args.output_dir,
+        candidate_pool_per_label=args.candidate_pool_per_label,
+        max_anomalies=args.max_anomalies,
+        seed=args.seed,
+        hop_mode=cast(HopMode, args.hop_mode),
+        exclude_unknown_exec=not args.include_unknown_exec,
+        fail_fast=args.fail_fast,
+        inference_run=run_dir,
+        model_dir=model_dir,
     )
 
 

@@ -56,6 +56,10 @@ class Config:
     hop_mode: HopMode = "two"
     exclude_unknown_exec: bool = True
     fail_fast: bool = False
+    inference_run: Path | None = None
+    """data/inference/<run_id> of an API/infer.py run; replaces the main.py file naming."""
+    model_dir: Path | None = None
+    """data/models/<model_id> of the model that produced inference_run."""
 
 
 @dataclass(frozen=True, slots=True)

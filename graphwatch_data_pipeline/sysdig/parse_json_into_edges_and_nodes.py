@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import csv
 import html
 import json
@@ -17,10 +18,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "output" / "json"
 OUTPUT_DIR = BASE_DIR / "output" / "edges_and_nodes"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-NODES_FILE = OUTPUT_DIR / "nodes.csv"
-EDGES_FILE = OUTPUT_DIR / "edges.csv"
+NODES_FILENAME = "nodes.csv"
+EDGES_FILENAME = "edges.csv"
 PROGRESS_INTERVAL = 1_000_000
 JSON_CHUNK_SIZE = 1024 * 1024
 
@@ -365,9 +365,10 @@ def update_process_from_event(processes, event):
 # ------------------------------
 
 
-def collect_nodes(input_dir):
+def collect_nodes(input_dir, processes=None):
+    """Pass 1. processes: state carried over from earlier batches (updated in place)."""
     nodes = {}
-    processes = {}
+    processes = {} if processes is None else processes
     event_count = 0
 
     for event in iter_all_events(input_dir):
@@ -476,11 +477,11 @@ def make_edge(src, dst, action, timestamp, event, resource_value=None):
     }
 
 
-def open_dedup_database():
+def open_dedup_database(directory):
     with tempfile.NamedTemporaryFile(
         prefix="sysdig_edge_dedup_",
         suffix=".sqlite3",
-        dir=OUTPUT_DIR,
+        dir=directory,
         delete=False,
     ) as temp:
         path = Path(temp.name)
@@ -505,14 +506,15 @@ def write_edge_if_new(writer, dedup_connection, edge):
     return True
 
 
-def process_and_write_edges(input_dir, resolved_process_tids):
-    fd_table = {}
+def process_and_write_edges(input_dir, resolved_process_tids, edges_file, fd_table=None):
+    """Pass 2. fd_table: open fds carried over from earlier batches (updated in place)."""
+    fd_table = {} if fd_table is None else fd_table
     edge_count = 0
     event_count = 0
-    dedup_connection, dedup_path = open_dedup_database()
+    dedup_connection, dedup_path = open_dedup_database(Path(edges_file).parent)
 
     try:
-        with EDGES_FILE.open("w", newline="", encoding="utf-8") as handle:
+        with Path(edges_file).open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=EDGE_FIELDNAMES, extrasaction="ignore")
             writer.writeheader()
 
@@ -632,7 +634,7 @@ def process_and_write_edges(input_dir, resolved_process_tids):
 # ------------------------------
 
 
-def save_nodes(nodes):
+def save_nodes(nodes, nodes_file):
     fieldnames = [
         "id",
         "type",
@@ -647,10 +649,91 @@ def save_nodes(nodes):
         "exited",
         "exit_timestamp",
     ]
-    with NODES_FILE.open("w", newline="", encoding="utf-8") as handle:
+    with Path(nodes_file).open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(nodes.values())
+
+
+# ------------------------------
+# State carried between incremental batches
+# ------------------------------
+
+
+def load_state(state_file):
+    """Processes and open fds of earlier batches (empty if there is no state yet)."""
+    state_file = Path(state_file)
+    if not state_file.exists():
+        return {}, {}
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    processes = {int(tid): proc for tid, proc in state.get("processes", {}).items()}
+    fd_table = {
+        int(tid): {int(fd): tuple(resource) for fd, resource in fds.items()}
+        for tid, fds in state.get("fd_table", {}).items()
+    }
+    return processes, fd_table
+
+
+def save_state(state_file, processes, fd_table):
+    """Keep only processes that are still alive; their fds stay resolvable next batch."""
+    alive = {tid: proc for tid, proc in processes.items() if proc.get("exited") != "true"}
+    state = {
+        "processes": {str(tid): proc for tid, proc in alive.items()},
+        "fd_table": {
+            str(tid): {str(fd): list(resource) for fd, resource in fds.items()}
+            for tid, fds in fd_table.items()
+            if tid in alive and fds
+        },
+    }
+    state_file = Path(state_file)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    tmp.replace(state_file)
+
+
+def parse_events(input_dir, output_dir, state_file=None):
+    """Write nodes.csv and edges.csv for all JSON files in input_dir.
+
+    With state_file, process/fd state from earlier batches is used and updated, so an
+    incremental batch resolves processes and fds that were started in an earlier one.
+    """
+    input_dir, output_dir = Path(input_dir), Path(output_dir)
+    nodes_file, edges_file = output_dir / NODES_FILENAME, output_dir / EDGES_FILENAME
+    print(f"[*] Input directory:  {input_dir}")
+    print(f"[*] Output directory: {output_dir}")
+    files = discover_input_files(input_dir)
+    if not files:
+        raise SystemExit(f"[!] No .json, .jsonl, or .ndjson files found in {input_dir}")
+
+    print(f"[*] Input files: {len(files)}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[*] Clearing {output_dir} before parsing...")
+    clear_directory(output_dir)
+
+    processes, fd_table = load_state(state_file) if state_file else ({}, {})
+
+    print("[*] Pass 1: collecting nodes and process metadata")
+    nodes, resolved_process_tids, pass1_count = collect_nodes(input_dir, processes)
+    print(f"[*] Pass 1 events:       {pass1_count:,}")
+    print(f"[*] Resolved processes:  {len(resolved_process_tids):,}")
+    print(f"[*] Collected nodes:     {len(nodes):,}")
+
+    save_nodes(nodes, nodes_file)
+    print(f"[*] Nodes written: {len(nodes):,} -> {nodes_file}")
+
+    print("[*] Pass 2: streaming and deduplicating edges")
+    edge_count, pass2_count = process_and_write_edges(
+        input_dir, resolved_process_tids, edges_file, fd_table
+    )
+    print(f"[*] Pass 2 events: {pass2_count:,}")
+    print(f"[*] Edges written: {edge_count:,} -> {edges_file}")
+    print("[*] Provenance graph exported")
+
+    if state_file:
+        save_state(state_file, processes, fd_table)
+    return {"events": pass1_count, "nodes": len(nodes), "edges": edge_count}
 
 
 # ------------------------------
@@ -658,32 +741,15 @@ def save_nodes(nodes):
 # ------------------------------
 
 
-def main():
-    print(f"[*] Input directory:  {INPUT_DIR}")
-    print(f"[*] Output directory: {OUTPUT_DIR}")
-    files = discover_input_files(INPUT_DIR)
-    if not files:
-        raise SystemExit(f"[!] No .json, .jsonl, or .ndjson files found in {INPUT_DIR}")
-
-    print(f"[*] Input files: {len(files)}")
-
-    print(f"[*] Clearing {OUTPUT_DIR} before parsing...")
-    clear_directory(OUTPUT_DIR)
-
-    print("[*] Pass 1: collecting nodes and process metadata")
-    nodes, resolved_process_tids, pass1_count = collect_nodes(INPUT_DIR)
-    print(f"[*] Pass 1 events:       {pass1_count:,}")
-    print(f"[*] Resolved processes:  {len(resolved_process_tids):,}")
-    print(f"[*] Collected nodes:     {len(nodes):,}")
-
-    save_nodes(nodes)
-    print(f"[*] Nodes written: {len(nodes):,} -> {NODES_FILE}")
-
-    print("[*] Pass 2: streaming and deduplicating edges")
-    edge_count, pass2_count = process_and_write_edges(INPUT_DIR, resolved_process_tids)
-    print(f"[*] Pass 2 events: {pass2_count:,}")
-    print(f"[*] Edges written: {edge_count:,} -> {EDGES_FILE}")
-    print("[*] Provenance graph exported")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Parse sysdig JSON events into nodes/edges CSVs")
+    parser.add_argument("--input-dir", type=Path, default=INPUT_DIR, help="JSON input directory")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR, help="CSV output directory")
+    parser.add_argument(
+        "--state-file", type=Path, help="Process/fd state to continue from (incremental mode)"
+    )
+    args = parser.parse_args(argv)
+    parse_events(args.input_dir, args.output_dir, args.state_file)
 
 
 if __name__ == "__main__":

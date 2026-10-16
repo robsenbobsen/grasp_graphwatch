@@ -235,12 +235,22 @@ class GroundTruthConfig:
     )  # type: ignore
 
 
+def set_db_name(db_name: str) -> None:
+    """Point DB_URL at another database on the configured server (overrides env db_name)."""
+    global DB_DATASET_NAME
+    global DB_URL
+
+    DB_DATASET_NAME = db_name
+    DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATASET_NAME}"
+
+
 def reload_experiment_config(config_path: str | Path | None = None) -> None:
     global EXPERIMENT_CONFIG_PATH
     global EXPERIMENT_CONFIG
     global RAW_DATASET_NAME
     global DATASET_NAME_ENUM
     global DATASET_NAME
+    global DB_DATASET_NAME
     global EXPERIMENT_PREFIX
     global DB_URL
     global ATTACK_WINDOWS_FOR_VISUALIZATION
@@ -264,7 +274,7 @@ def reload_experiment_config(config_path: str | Path | None = None) -> None:
     DB_DATASET_NAME = DATASET_NAME_ENUM.value
 
     if DB_NAME_FROM_ENV != "default_db":
-        DB_DATASET_NAME: str = DB_NAME_FROM_ENV
+        DB_DATASET_NAME = DB_NAME_FROM_ENV
 
     EXPERIMENT_PREFIX = EXPERIMENT_CONFIG.get("experiment_prefix", "default")
 

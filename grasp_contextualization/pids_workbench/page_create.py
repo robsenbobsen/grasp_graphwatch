@@ -1,5 +1,5 @@
-"""'Create report' page: discover raw experiment runs and shell out to
-pids_analysis_engine.py."""
+"""'Create report' page: discover inference runs (REST API / infer.py) or raw
+main.py experiment runs and shell out to pids_analysis_engine.py."""
 
 from __future__ import annotations
 
@@ -119,9 +119,154 @@ def discover_experiment_runs_cached(data_dir_str: str) -> pd.DataFrame:
     return df
 
 
+def _existing_reports_by_run(reports_root: Path) -> dict[str, list[str]]:
+    """Inference run id -> report dirs already created for it (from their run_config.json)."""
+    out: dict[str, list[str]] = {}
+    for cfg_file in reports_root.glob("*/run_config.json"):
+        run = read_json_if_exists(cfg_file).get("inference_run")
+        if run:
+            out.setdefault(Path(str(run)).name, []).append(str(cfg_file.parent))
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def discover_inference_runs_cached(repo_root_str: str) -> pd.DataFrame:
+    """All inference runs in data/inference with their model's dataset and report status."""
+    root = Path(repo_root_str)
+    existing = _existing_reports_by_run(root / "pids_runs")
+    rows: list[dict[str, Any]] = []
+    for run_file in (root / "data" / "inference").glob("*/run.json"):
+        run = read_json_if_exists(run_file)
+        run_dir = run_file.parent
+        model = read_json_if_exists(root / "data" / "models" / str(run.get("model_id")) / "metadata.json")
+        anomalies = read_json_if_exists(run_dir / "detailed_report.json").get(
+            "detailed_detection", {}
+        ).get("anomalies", [])
+        reports = existing.get(run_dir.name, [])
+        rows.append(
+            {
+                "run_id": run_dir.name,
+                "db_name": run.get("db_name", "?"),
+                "dataset": model.get("dataset", "?"),
+                "model_id": run.get("model_id", "?"),
+                "inference_start": run.get("inference_start", "?"),
+                "inference_end": run.get("inference_end", "?"),
+                "anomalies": len(anomalies) if isinstance(anomalies, list) else 0,
+                "ground_truth": run.get("ground_truth_dir") or "",
+                "completed_at": run.get("completed_at", ""),
+                "model_present": bool(model),
+                "reports": len(reports),
+                "report_dirs": "\n".join(reports),
+                "run_dir": str(run_dir),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=["label"])
+    df = pd.DataFrame(rows).sort_values("completed_at", ascending=False).reset_index(drop=True)
+    df["label"] = df.apply(
+        lambda r: (
+            f"{r['run_id']} | {r['dataset']} | {r['inference_start']} → {r['inference_end']}"
+            f" | anomalies={r['anomalies']} | gt={'yes' if r['ground_truth'] else 'no'}"
+            f" | report={'yes (' + str(r['reports']) + ')' if r['reports'] else 'no'}"
+        ),
+        axis=1,
+    )
+    return df
+
+
+def _run_engine(cmd: list[str], cwd: Path, output_dir: Path) -> None:
+    with st.status("Running analysis", expanded=True) as status:
+        st.code(" ".join(cmd))
+        try:
+            subprocess.run(cmd, check=True, cwd=str(cwd))
+            st.session_state["selected_report_dir"] = str(output_dir)
+            discover_reports_cached.clear()
+            discover_inference_runs_cached.clear()
+            load_report.clear()
+            status.update(label="Done", state="complete")
+            st.success(f"Wrote report to {output_dir}. Open it on the Overview / Context View pages.")
+        except Exception as exc:  # noqa: BLE001
+            status.update(label="Failed", state="error")
+            st.exception(exc)
+
+
+def _page_create_from_inference() -> None:
+    st.caption(
+        "Inference runs of the REST API / infer.py (data/inference). The model, dataset and "
+        "window sizes are taken from the run, nothing else to fill in."
+    )
+    if st.button("Refresh inference runs"):
+        discover_inference_runs_cached.clear()
+    runs = discover_inference_runs_cached(str(REPO_ROOT))
+    if runs.empty:
+        st.info(f"No inference runs found in {REPO_ROOT / 'data' / 'inference'}.")
+        return
+    label = st.selectbox("Choose inference run", runs["label"].tolist())
+    selected = runs[runs["label"] == label].iloc[0].to_dict()
+    if not selected["model_present"]:
+        st.error(f"Model {selected['model_id']} of this run no longer exists in data/models.")
+        return
+    if selected["reports"]:
+        st.info("Reports already created for this run:\n\n" + selected["report_dirs"])
+    with st.form("create_report_inference"):
+        c1, c2 = st.columns(2)
+        with c1:
+            pool = st.number_input("Candidate pool per label", min_value=1, value=5)
+            max_anoms = st.text_input("Max anomalies empty=all", "")
+            hop = st.selectbox("Hop", ["two", "one"])
+        with c2:
+            output_dir = Path(
+                st.text_input(
+                    "Output dir",
+                    str(
+                        REPO_ROOT
+                        / "pids_runs"
+                        / f"{selected['run_id']}_pygdist_pool{int(pool)}_max{max_anoms or 'full'}"
+                    ),
+                )
+            )
+            include_unknown = st.checkbox("Include unknown exec", False)
+        submitted = st.form_submit_button("Run analysis")
+    if not submitted:
+        st.subheader("Inference runs")
+        st.dataframe(
+            runs.drop(columns=["label", "report_dirs"], errors="ignore"), use_container_width=True
+        )
+        return
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "grasp_contextualization" / "pids_analysis_engine.py"),
+        "--inference-run",
+        str(selected["run_dir"]),
+        "--output-dir",
+        str(output_dir),
+        "--candidate-pool-per-label",
+        str(int(pool)),
+        "--hop-mode",
+        hop,
+    ]
+    if max_anoms.strip():
+        cmd += ["--max-anomalies", max_anoms.strip()]
+    if include_unknown:
+        cmd += ["--include-unknown-exec"]
+    _run_engine(cmd, REPO_ROOT, output_dir)
+
+
 def page_create() -> None:
     st.header("Create Contextualization Report")
     st.caption("Runs pids_analysis_engine.py and writes its CSV/JSON report schema.")
+    source = st.radio(
+        "Source",
+        ["Inference runs (REST API / infer.py)", "Experiment runs (main.py)"],
+        horizontal=True,
+    )
+    if source.startswith("Inference"):
+        _page_create_from_inference()
+    else:
+        _page_create_from_experiment()
+
+
+def _page_create_from_experiment() -> None:
     data_dir = Path(st.text_input("Data dir", str(REPO_ROOT)))
     if st.button("Refresh raw runs"):
         discover_experiment_runs_cached.clear()
@@ -203,15 +348,4 @@ def page_create() -> None:
         cmd += ["--max-anomalies", max_anoms.strip()]
     if include_unknown:
         cmd += ["--include-unknown-exec"]
-    with st.status("Running analysis", expanded=True) as status:
-        st.code(" ".join(cmd))
-        try:
-            subprocess.run(cmd, check=True, cwd=str(effective_data_dir))
-            st.session_state["selected_report_dir"] = str(output_dir)
-            discover_reports_cached.clear()
-            load_report.clear()
-            status.update(label="Done", state="complete")
-            st.success(f"Wrote report to {output_dir}")
-        except Exception as exc:  # noqa: BLE001
-            status.update(label="Failed", state="error")
-            st.exception(exc)
+    _run_engine(cmd, effective_data_dir, output_dir)

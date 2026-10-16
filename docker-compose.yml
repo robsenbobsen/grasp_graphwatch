@@ -1,10 +1,12 @@
 # Full GRASP stack. Everything (project, services, containers, image, network,
 # volume) is named with the `doc-comp_` / `doc-comp` prefix.
 #
-#   cp .env.docker.example .env.docker          # once, then adjust
+#   cp .env.docker.example .env.docker          # once, then adjust (GRASP_API_KEY!)
 #   docker compose build
-#   docker compose up -d doc-comp_postgres doc-comp_workbench
-#   docker compose run --rm doc-comp_grasp      # training/detection run
+#   docker compose up -d                        # detection API + workbench (DB from .env.docker)
+#   docker compose --profile db up -d           # ... plus the bundled doc-comp_postgres
+#   curl localhost:8000/docs                    # API docs; jobs need the X-API-Key header
+#   docker compose --profile cli run --rm doc-comp_grasp      # full pipeline via main.py
 #   docker compose --profile pipeline run --rm doc-comp_sysdig_pipeline
 #
 # The detection services use all NVIDIA GPUs (needs the NVIDIA Container Toolkit).
@@ -45,6 +47,9 @@ services:
     image: postgres:17
     container_name: doc-comp_postgres
     restart: unless-stopped
+    # Optional: only started with `--profile db`. By default the services use the database
+    # configured in .env.docker (db_host/db_port/...), e.g. an existing remote Postgres.
+    profiles: ["db"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-grasp}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grasp}
@@ -64,12 +69,34 @@ services:
       retries: 5
       start_period: 10s
 
-  doc-comp_grasp:
+  # REST API: queues training/inference jobs (train.py / infer.py) and serves results.
+  doc-comp_detection_api:
     <<: *detection-service
-    container_name: doc-comp_grasp
+    container_name: doc-comp_detection_api
+    restart: unless-stopped
     depends_on:
       doc-comp_postgres:
         condition: service_healthy
+        required: false  # only when started with --profile db
+    ports:
+      - "${API_PORT:-8000}:8000"
+    command: ["uvicorn", "detection_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Full pipeline in one go via main.py (manual runs; the API is the default entry point).
+  doc-comp_grasp:
+    <<: *detection-service
+    container_name: doc-comp_grasp
+    profiles: ["cli"]
+    depends_on:
+      doc-comp_postgres:
+        condition: service_healthy
+        required: false  # only when started with --profile db
     command:
       - python
       - main.py
@@ -98,6 +125,7 @@ services:
     depends_on:
       doc-comp_postgres:
         condition: service_healthy
+        required: false  # only when started with --profile db
     command: ["python", "graphwatch_data_pipeline/sysdig/main.py"]
 
 networks:

@@ -25,3 +25,4 @@ graphwatch_data_pipeline/sysdig/backup_data/
 bachup_data/*
 grasp/experiments/sysdig_spade/experiment_sysdig_2_tmp.yaml
 db_setup/dumps/
+tests/test_detection_api.py

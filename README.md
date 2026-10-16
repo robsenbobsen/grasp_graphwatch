@@ -91,6 +91,20 @@ If everything runs on the same host and you followed [db_setup README](db_setup/
 python main.py --experiment-config grasp/experiments/all_experiments/cadets_e3_default/experiment_cadets_e3.yaml
 ```
 
+### Train once, infer later
+
+`main.py` runs training and detection in one go. The same work can be split, so a
+trained model is reused for new time ranges with the identical preprocessing:
+
+```bash
+python train.py --db-name cadets_e3 --train-start "2018-04-02 00:00:00" --train-end "2018-04-05 23:59:59"
+python infer.py --db-name cadets_e3 --inference-start "2018-04-06 00:00:00" --inference-end "2018-04-13 23:59:59" \
+  --ground-truth-dir ground_truth/cadets_e3   # optional
+```
+
+Both are also available as a REST API (`detection_api/`), see
+[README_setup_docker_compose.md](README_setup_docker_compose.md).
+
 ## Optional: Explore reported anomalies with contextualization
 
 After a run, you can optionally use the PIDS contextualization workbench to
@@ -112,19 +126,19 @@ named with the `doc-comp_` prefix (project `doc-comp`):
 
 | Service | Purpose |
 | --- | --- |
-| `doc-comp_postgres` | PostgreSQL 17 (data in volume `doc-comp_postgres_data`, host port 8888) |
-| `doc-comp_grasp` | runs `main.py` with `GRASP_EXPERIMENT_CONFIG` |
+| `doc-comp_postgres` | optional PostgreSQL 17 (profile `db`, volume `doc-comp_postgres_data`, host port 8888) |
+| `doc-comp_detection_api` | REST API on http://localhost:8000 (training/inference jobs) |
+| `doc-comp_grasp` | runs `main.py` manually (profile `cli`) |
 | `doc-comp_workbench` | contextualization workbench on http://localhost:8501 |
 | `doc-comp_sysdig_pipeline` | sysdig `.scap` → Postgres pipeline (profile `pipeline`) |
 
 ```bash
-cp .env.docker.example .env.docker
+cp .env.docker.example .env.docker      # set GRASP_API_KEY
 docker compose build
-docker compose up -d doc-comp_postgres doc-comp_workbench
-docker compose run --rm doc-comp_grasp
-# other experiment:
+docker compose up -d                    # detection API + workbench, DB from .env.docker
+# full pipeline via main.py instead of the API:
 GRASP_EXPERIMENT_CONFIG=grasp/experiments/all_experiments/theia_e3_default/experiment_theia_e3.yaml \
-  docker compose run --rm doc-comp_grasp
+  docker compose --profile cli run --rm doc-comp_grasp
 ```
 
 Load PIDSMaker dumps (see [db_setup README](db_setup/README.md)) by placing them in

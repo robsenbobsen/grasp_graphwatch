@@ -12,6 +12,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def local_path(path: str | Path) -> Path:
+    """Map a stored graph path onto this checkout if it was written elsewhere.
+
+    Reports of API runs contain container paths such as
+    /detection_service/data/models/<id>/extended_graphs/...; outside the container (or in
+    another checkout) the same file lives under REPO_ROOT/data/....
+    """
+    p = Path(path)
+    if p.exists() or "data" not in p.parts:
+        return p
+    parts = p.parts
+    candidate = REPO_ROOT.joinpath(*parts[parts.index("data") :])
+    return candidate if candidate.exists() else p
+
+
 def neighbor_fanout(name_hint: str, hop_mode: str) -> list[int]:
     """NeighborLoader fanout for a dataset/run, keyed off a dataset name or path.
 

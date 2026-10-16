@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -17,7 +18,6 @@ SCAP_DIR = BASE_DIR / "input" / "sysdig_scaps"
 
 # Output directory
 OUTPUT_DIR = BASE_DIR / "output" / "json"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def clear_directory(directory):
@@ -71,23 +71,38 @@ def scap_to_json(scap_file, output_file):
             raise RuntimeError(f"sysdig failed for {scap_file}:\n{''.join(stderr_lines)}")
 
 
-if __name__ == "__main__":
+def find_scap_files(scap_dir):
+    return sorted(Path(scap_dir).glob("*.scap*"))
+
+
+def convert_scap_files(scap_files, output_dir):
+    """Convert the given scap files into <output_dir>/<name>.json (cleared first)."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[*] Clearing {output_dir} before conversion...")
+    clear_directory(output_dir)
+
+    for scap_file in scap_files:
+        # Create output file per input file
+        scap_to_json(scap_file, output_dir / f"{Path(scap_file).name}.json")
+
+    print(f"[*] Done. Output files written to {output_dir}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Convert sysdig .scap files to JSON lines")
+    parser.add_argument("--scap-dir", type=Path, default=SCAP_DIR, help="Directory with *.scap* files")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR, help="JSON output directory")
+    args = parser.parse_args(argv)
+
     print("[*] Searching for scap files...")
-
-    scap_files = list(SCAP_DIR.glob("*.scap*"))
-
+    scap_files = find_scap_files(args.scap_dir)
     if not scap_files:
-        raise FileNotFoundError(f"No scap* files found in {SCAP_DIR}")
-
+        raise FileNotFoundError(f"No scap* files found in {args.scap_dir}")
     print(f"[*] Found {len(scap_files)} files")
 
-    print(f"[*] Clearing {OUTPUT_DIR} before conversion...")
-    clear_directory(OUTPUT_DIR)
+    convert_scap_files(scap_files, args.output_dir)
 
-    for scap_file in sorted(scap_files):
-        # Create output file per input file
-        output_file = OUTPUT_DIR / f"{scap_file.name}.json"
 
-        scap_to_json(scap_file, output_file)
-
-    print(f"[*] Done. Output files written to {OUTPUT_DIR}")
+if __name__ == "__main__":
+    main()

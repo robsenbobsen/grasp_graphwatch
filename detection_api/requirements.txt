@@ -1,0 +1,5 @@
+# REST API of the detection service, on top of the root requirements.txt.
+fastapi==0.115.12
+uvicorn==0.34.0
+# for fastapi.testclient in tests/
+httpx==0.28.1

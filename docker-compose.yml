@@ -1,33 +1,50 @@
-# Containerized `grasp` (training/detection run) and the `grasp_contextualization`
-# workbench, sharing one image (see Dockerfile). CPU by default — layer
-# docker-compose.gpu.yml on top for GPU. See README's "Docker" section.
+# Full GRASP stack. Everything (project, services, containers, image, network,
+# volume) is named with the `doc-comp_` / `doc-comp` prefix.
 #
-# Postgres is optional and NOT started by default: `grasp`/`workbench` are meant to
-# reach an existing database (e.g. one started via
-# graphwatch_data_pipeline/db_setup/docker-compose.yml) through host.docker.internal.
-# To use the bundled Postgres instead, run with `--profile db` and set db_host=postgres
-# in .env.docker (see .env.docker.example).
+#   cp .env.docker.example .env.docker          # once, then adjust
+#   docker compose build
+#   docker compose up -d doc-comp_postgres doc-comp_workbench
+#   docker compose run --rm doc-comp_grasp      # training/detection run
+#   docker compose --profile pipeline run --rm doc-comp_sysdig_pipeline
+#
+# The detection services use all NVIDIA GPUs (needs the NVIDIA Container Toolkit).
+# See README's "Docker" section for details (loading PIDSMaker dumps, external DB).
 
-x-grasp-image: &grasp-image
+name: doc-comp
+
+x-detection-service: &detection-service
   build:
     context: .
     dockerfile: Dockerfile
-  image: grasp:latest
+    args:
+      TORCH_VARIANT: ${TORCH_VARIANT:-cu129}
+  image: doc-comp_grasp:latest
   env_file:
     - .env.docker
+  # Run as the host user so files written to the bind-mounted repo (data/, pids_runs/, ...)
+  # are not root-owned. Export HOST_UID/HOST_GID in your shell if they differ from 1000.
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
   volumes:
-    - .:/app
-  working_dir: /app
-  # Lets db_host=host.docker.internal resolve on Linux too, not just Docker Desktop.
+    - .:/detection_service
+  working_dir: /detection_service
+  networks:
+    - doc-comp_net
+  # Lets db_host=host.docker.internal reach a DB on the host (Linux too).
   extra_hosts:
     - "host.docker.internal:host-gateway"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
 
 services:
-  postgres:
+  doc-comp_postgres:
     image: postgres:17
-    container_name: grasp_postgres
+    container_name: doc-comp_postgres
     restart: unless-stopped
-    profiles: ["db"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-grasp}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grasp}
@@ -35,30 +52,58 @@ services:
     ports:
       - "${POSTGRES_PORT:-8888}:5432"
     volumes:
-      - ./.postgres_data:/var/lib/postgresql/data
+      - doc-comp_postgres_data:/var/lib/postgresql/data
+      # PIDSMaker .dump files to pg_restore from (see README "Docker").
+      - ${DUMPS_DIR:-./db_setup/dumps}:/dumps:ro
+    networks:
+      - doc-comp_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-grasp} -d ${POSTGRES_DB_NAME:-sysdig}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
       start_period: 10s
 
-  grasp:
-    <<: *grasp-image
-    container_name: grasp
-    # command:
-    #   - python
-    #   - main.py
-    #   - --experiment-config
-    #   - grasp/experiments/all_experiments/sysdig_spade/experiment_sysdig_1.yaml
+  doc-comp_grasp:
+    <<: *detection-service
+    container_name: doc-comp_grasp
+    depends_on:
+      doc-comp_postgres:
+        condition: service_healthy
+    command:
+      - python
+      - main.py
+      - --experiment-config
+      - ${GRASP_EXPERIMENT_CONFIG:-grasp/experiments/all_experiments/cadets_e3_default/experiment_cadets_e3.yaml}
 
-  workbench:
-    <<: *grasp-image
-    container_name: grasp_workbench
+  doc-comp_workbench:
+    <<: *detection-service
+    container_name: doc-comp_workbench
+    restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "${WORKBENCH_PORT:-8501}:8501"
     command:
       - streamlit
       - run
       - grasp_contextualization/pids_workbench_app.py
       - --server.address=0.0.0.0
+      - --server.headless=true
+
+  # Converts .scap captures in graphwatch_data_pipeline/sysdig/input/sysdig_scaps
+  # and uploads them into doc-comp_postgres. Only started on demand.
+  doc-comp_sysdig_pipeline:
+    <<: *detection-service
+    container_name: doc-comp_sysdig_pipeline
+    profiles: ["pipeline"]
+    depends_on:
+      doc-comp_postgres:
+        condition: service_healthy
+    command: ["python", "graphwatch_data_pipeline/sysdig/main.py"]
+
+networks:
+  doc-comp_net:
+    name: doc-comp_net
+
+volumes:
+  doc-comp_postgres_data:
+    name: doc-comp_postgres_data

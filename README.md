@@ -104,6 +104,50 @@ full workflow (generating a report, then browsing it):
 streamlit run grasp_contextualization/pids_workbench_app.py
 ```
 
+## Docker
+
+Instead of the local install, the whole stack can run via Docker Compose (on NVIDIA GPUs).
+The full step-by-step guide is [README_setup_docker_compose.md](README_setup_docker_compose.md). Everything is
+named with the `doc-comp_` prefix (project `doc-comp`):
+
+| Service | Purpose |
+| --- | --- |
+| `doc-comp_postgres` | PostgreSQL 17 (data in volume `doc-comp_postgres_data`, host port 8888) |
+| `doc-comp_grasp` | runs `main.py` with `GRASP_EXPERIMENT_CONFIG` |
+| `doc-comp_workbench` | contextualization workbench on http://localhost:8501 |
+| `doc-comp_sysdig_pipeline` | sysdig `.scap` → Postgres pipeline (profile `pipeline`) |
+
+```bash
+cp .env.docker.example .env.docker
+docker compose build
+docker compose up -d doc-comp_postgres doc-comp_workbench
+docker compose run --rm doc-comp_grasp
+# other experiment:
+GRASP_EXPERIMENT_CONFIG=grasp/experiments/all_experiments/theia_e3_default/experiment_theia_e3.yaml \
+  docker compose run --rm doc-comp_grasp
+```
+
+Load PIDSMaker dumps (see [db_setup README](db_setup/README.md)) by placing them in
+`db_setup/dumps/` (or set `DUMPS_DIR`) and restoring into the bundled DB:
+
+```bash
+docker compose exec doc-comp_postgres createdb -U grasp cadets_e3
+docker compose exec doc-comp_postgres pg_restore -U grasp -d cadets_e3 /dumps/cadets_e3.dump
+```
+
+Sysdig captures: put `.scap` files in `graphwatch_data_pipeline/sysdig/input/sysdig_scaps`, then
+
+```bash
+docker compose --profile pipeline run --rm doc-comp_sysdig_pipeline
+```
+
+To use an existing database on the host instead, set `db_host=host.docker.internal` and its
+host port in `.env.docker`.
+
+The image is built for NVIDIA GPUs (CUDA 12.9) and the detection services reserve all GPUs, which
+requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host.
+
 ## License
 
 See [LICENSE](LICENSE) for details.

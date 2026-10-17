@@ -201,7 +201,12 @@ def _page_create_from_inference() -> None:
     if runs.empty:
         st.info(f"No inference runs found in {REPO_ROOT / 'data' / 'inference'}.")
         return
-    label = st.selectbox("Choose inference run", runs["label"].tolist())
+    # ?run=<run_id> (e.g. the GraphWatch console's "Open in workbench") preselects that run
+    wanted = st.query_params.get("run")
+    matches = runs.index[runs["run_id"] == wanted].tolist() if wanted else []
+    label = st.selectbox(
+        "Choose inference run", runs["label"].tolist(), index=matches[0] if matches else 0
+    )
     selected = runs[runs["label"] == label].iloc[0].to_dict()
     if not selected["model_present"]:
         st.error(f"Model {selected['model_id']} of this run no longer exists in data/models.")

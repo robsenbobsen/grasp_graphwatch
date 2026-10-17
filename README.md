@@ -130,6 +130,7 @@ named with the `doc-comp_` prefix (project `doc-comp`):
 | `doc-comp_detection_api` | REST API on http://localhost:8000 (training/inference jobs) |
 | `doc-comp_grasp` | runs `main.py` manually (profile `cli`) |
 | `doc-comp_workbench` | contextualization workbench on http://localhost:8501 |
+| `doc-comp_console` | GRASP GraphWatch console on http://localhost:8502, interactive front end for the API (profile `console`) |
 | `doc-comp_sysdig_pipeline` | sysdig `.scap` → Postgres pipeline (profile `pipeline`) |
 
 ```bash

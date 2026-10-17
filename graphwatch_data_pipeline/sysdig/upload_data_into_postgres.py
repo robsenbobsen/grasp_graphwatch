@@ -134,6 +134,19 @@ def _existing_tables(cur) -> set[str]:
     return {row[0] for row in cur.fetchall()}
 
 
+def has_events(db_name: str) -> bool:
+    """Whether db_name has a non-empty event_table."""
+    conn = psycopg2.connect(**conn_args(db_name))
+    try:
+        with conn.cursor() as cur:
+            if "event_table" not in _existing_tables(cur):
+                return False
+            cur.execute("SELECT EXISTS (SELECT 1 FROM event_table)")
+            return bool(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
 def read_existing_index(db_name: str) -> tuple[dict[str, int], int, int]:
     """Node uuid -> index_id already in the DB, the next free index_id and the next event _id."""
     conn = psycopg2.connect(**conn_args(db_name))

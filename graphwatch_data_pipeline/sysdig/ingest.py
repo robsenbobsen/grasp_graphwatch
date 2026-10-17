@@ -101,6 +101,17 @@ def ingest(
         process_state_file.unlink(missing_ok=True)
 
     ledger = json.loads(ledger_file.read_text()) if ledger_file.exists() else {}
+    if ledger and not upload.has_events(db_name):
+        # e.g. `docker compose down -v`, DROP DATABASE or DROP TABLE: the state survives (it
+        # is a file in the repo) but its data is gone. Nothing can be duplicated, so start over.
+        print(
+            f"[!] The ingestion state lists {len(ledger)} ingested file(s), but '{db_name}' "
+            "has no events (database or volume was deleted?). Discarding the stale state and "
+            "ingesting from scratch."
+        )
+        ledger = {}
+        ledger_file.unlink(missing_ok=True)
+        process_state_file.unlink(missing_ok=True)
     files = find_new_files(Path(scap_dir), ledger, min_file_age)
     if max_files:
         files = files[:max_files]

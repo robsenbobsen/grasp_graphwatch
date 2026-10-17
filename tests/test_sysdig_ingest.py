@@ -97,3 +97,36 @@ def test_build_tables_continues_existing_index(tmp_path):
 
 def test_ns_to_time_is_utc():
     assert ingest.ns_to_time(1_700_000_000_000_000_000) == "2023-11-14 22:13:20"
+
+
+def _event(num, tid, evt_type, info, direction="<"):
+    return {"evt.num": num, "evt.outputtime": 1_700_000_000_000_000_000 + num, "evt.type": evt_type,
+            "evt.dir": direction, "evt.info": info, "thread.tid": tid, "proc.name": "p"}  # fmt: skip
+
+
+def test_single_pass_keeps_edges_of_processes_resolved_later(tmp_path):
+    import json as json_
+
+    events = [
+        _event(1, 5, "openat", "fd=3(<f>/etc/early) name=/etc/early"),  # before tid 5's execve
+        _event(2, 6, "openat", "fd=3(<f>/etc/never) name=/etc/never"),  # tid 6 never resolved
+        _event(3, 5, "execve", "res=0 exe=/bin/app"),
+        _event(4, 5, "read", "fd=3(<f>/etc/early) size=10"),
+        _event(5, 5, "read", "fd=3(<f>/etc/early) size=10"),
+    ]
+    src = tmp_path / "json"
+    src.mkdir()
+    (src / "a.json").write_text("\n".join(json_.dumps(e) for e in events) + "\n")
+
+    summary = parser_.parse_events(src, tmp_path / "out")
+
+    edges = pd.read_csv(tmp_path / "out" / "edges.csv")
+    assert edges[["src", "dst", "action"]].values.tolist() == [
+        ["proc:5", "file:/etc/early", "open"],
+        ["proc:5", "file:/bin/app", "exec"],
+        ["file:/etc/early", "proc:5", "read"],
+        ["file:/etc/early", "proc:5", "read"],
+    ]
+    nodes = pd.read_csv(tmp_path / "out" / "nodes.csv")
+    assert "proc:5" in nodes["id"].tolist() and "proc:6" not in nodes["id"].tolist()
+    assert summary == {"events": 5, "nodes": len(nodes), "edges": 4}

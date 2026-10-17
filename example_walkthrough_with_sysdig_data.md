@@ -22,12 +22,8 @@ docker-compose stack** (`doc-comp_postgres`, on kenny), not on the remote DARPA 
 Postgres, the DARPA databases on `141.71.31.196` are not reachable through the API. See
 "Switching back" below.
 
-1. **Pick a host port.** 8888 is taken by `grasp_graphwatch_postgres`. In `.env` (variables of
-   `docker-compose.yml` itself), add:
-
-   ```
-   POSTGRES_PORT=8898
-   ```
+1. **Host port.** The bundled Postgres is reachable on the host at port 18888 (default). To use
+   another one, set `POSTGRES_PORT=<port>` in `.env` (variables of `docker-compose.yml` itself).
 
 2. **Point the API at the bundled server.** In `.env.docker`, set the DB block. Comment out the
    remote values; each key must appear only once:
@@ -39,7 +35,7 @@ Postgres, the DARPA databases on `141.71.31.196` are not reachable through the A
    db_port=5432
    ```
 
-   `db_port` is the port inside the Docker network (5432), not the host port 8898.
+   `db_port` is the port inside the Docker network (5432), not the host port 18888.
 
 3. **Start the stack with the database profile.** Recreate the containers so the API reads the
    new settings:
@@ -50,8 +46,22 @@ Postgres, the DARPA databases on `141.71.31.196` are not reachable through the A
    docker compose exec doc-comp_detection_api sh -c 'echo $db_user@$db_host:$db_port'   # grasp@doc-comp_postgres:5432
    ```
 
-The data is kept in the Docker volume `doc-comp_postgres_data` and survives restarts.
-Ingestion creates the `sysdig_coffeebot_*` databases there on first use. To look inside:
+**Which databases exist** is configured in `.env.docker`:
+
+```
+POSTGRES_DATABASES=sysdig_coffeebot_static,sysdig_coffeebot_live
+```
+
+On every `docker compose --profile db up`, the one-off service `doc-comp_postgres_init` creates
+the listed databases that don't exist yet, then exits (`docker logs doc-comp_postgres_init`
+shows `created:` / `exists:`). Existing databases are never changed, and the API only starts
+once this has succeeded. The databases are empty until the first ingestion creates their
+tables; until then the `event_table` query below reports `relation "event_table" does not
+exist`. Ingestion would also create a missing database by itself; the list just makes them
+exist from the start, e.g. for `psql` or for restoring dumps.
+
+The data is kept in the Docker volume `doc-comp_postgres_data` and survives restarts. To look
+inside:
 
 ```bash
 docker compose exec doc-comp_postgres psql -U grasp -l                                     # databases
@@ -295,7 +305,11 @@ Drop a single database in the bundled Postgres:
 docker compose exec doc-comp_postgres psql -U grasp -d postgres -c "DROP DATABASE sysdig_coffeebot_live;"
 ```
 
-Its ingestion state (`output/state/<db_name>/`) must go too, otherwise the next ingest thinks
-the files are already in. Alternatively, `"reset": true` on the next ingest call does both.
 To delete **all** data of the bundled Postgres, run `docker compose --profile db down -v`, which
 removes the volume `doc-comp_postgres_data`.
+
+The ingestion state (`graphwatch_data_pipeline/sysdig/output/state/<db_name>/`) is a file in the
+repository, so it survives both. You don't need to delete it by hand: when the state lists
+ingested files but the database has no events, the next ingest call prints `[!] ... Discarding
+the stale state` and ingests everything again. To start over while the data is still there,
+send one ingest call with `"reset": true`.

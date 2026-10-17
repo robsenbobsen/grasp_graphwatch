@@ -50,12 +50,12 @@ services:
     # Optional: only started with `--profile db`. By default the services use the database
     # configured in .env.docker (db_host/db_port/...), e.g. an existing remote Postgres.
     profiles: ["db"]
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-grasp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grasp}
-      POSTGRES_DB: ${POSTGRES_DB_NAME:-sysdig}
+    # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB (applied when the volume is first
+    # initialized) and POSTGRES_DATABASES come from .env.docker.
+    env_file:
+      - .env.docker
     ports:
-      - "${POSTGRES_PORT:-8888}:5432"
+      - "${POSTGRES_PORT:-18888}:5432"
     volumes:
       - doc-comp_postgres_data:/var/lib/postgresql/data
       # PIDSMaker .dump files to pg_restore from (see README "Docker").
@@ -63,11 +63,29 @@ services:
     networks:
       - doc-comp_net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # One-off: creates the databases listed in POSTGRES_DATABASES (.env.docker) that do not
+  # exist yet, on every `docker compose --profile db up`, then exits.
+  doc-comp_postgres_init:
+    image: postgres:17
+    container_name: doc-comp_postgres_init
+    profiles: ["db"]
+    env_file:
+      - .env.docker
+    volumes:
+      - ./db_setup/create_databases.sh:/create_databases.sh:ro
+    entrypoint: ["sh", "/create_databases.sh"]
+    networks:
+      - doc-comp_net
+    depends_on:
+      doc-comp_postgres:
+        condition: service_healthy
+    restart: "no"
 
   # REST API: queues training/inference jobs (train.py / infer.py) and serves results.
   doc-comp_detection_api:
@@ -78,6 +96,9 @@ services:
       doc-comp_postgres:
         condition: service_healthy
         required: false  # only when started with --profile db
+      doc-comp_postgres_init:
+        condition: service_completed_successfully
+        required: false
     ports:
       - "${API_PORT:-8000}:8000"
     command: ["uvicorn", "detection_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -97,6 +118,9 @@ services:
       doc-comp_postgres:
         condition: service_healthy
         required: false  # only when started with --profile db
+      doc-comp_postgres_init:
+        condition: service_completed_successfully
+        required: false
     command:
       - python
       - main.py
@@ -116,6 +140,38 @@ services:
       - --server.address=0.0.0.0
       - --server.headless=true
 
+  # GRASP GraphWatch console: interactive front end for the REST API (all features), links
+  # to the workbench. Only with `--profile console`; needs no GPU.
+  doc-comp_console:
+    image: doc-comp_grasp:latest
+    container_name: doc-comp_console
+    profiles: ["console"]
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    volumes:
+      - .:/detection_service
+    working_dir: /detection_service
+    networks:
+      - doc-comp_net
+    depends_on:
+      doc-comp_detection_api:
+        condition: service_healthy
+    environment:
+      GRASP_API_URL: http://doc-comp_detection_api:8000
+      # host ports, for links opened in the browser (same host as the console)
+      API_PORT: ${API_PORT:-8000}
+      WORKBENCH_PORT: ${WORKBENCH_PORT:-8501}
+    ports:
+      - "${CONSOLE_PORT:-8502}:8501"
+    command:
+      - streamlit
+      - run
+      - graphwatch_console/app.py
+      - --server.address=0.0.0.0
+      - --server.headless=true
+
   # Converts .scap captures in graphwatch_data_pipeline/sysdig/input/sysdig_scaps
   # and uploads them into doc-comp_postgres. Only started on demand.
   doc-comp_sysdig_pipeline:
@@ -126,6 +182,9 @@ services:
       doc-comp_postgres:
         condition: service_healthy
         required: false  # only when started with --profile db
+      doc-comp_postgres_init:
+        condition: service_completed_successfully
+        required: false
     command: ["python", "graphwatch_data_pipeline/sysdig/main.py"]
 
 networks:

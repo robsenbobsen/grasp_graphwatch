@@ -61,7 +61,9 @@ writes rotating capture files (e.g. `sysdig -w input/live/live.scap -C 100`).
   process whose executable only shows up in a *later* file can't be attributed yet and are
   dropped (in tests ~0.7% of events).
 - **State is kept per database.** The ingested files and the process state are stored in
-  `output/state/<db_name>/`. `--reset` drops the tables and that state and starts over.
+  `output/state/<db_name>/`. `--reset` drops the tables and that state and starts over. If
+  the database was deleted (e.g. `docker compose down -v`) but the state still lists files,
+  the state is discarded automatically and everything is ingested again.
 - **Optional inference.** `--run-inference` (optionally with `--model-id` and
   `--ground-truth-dir`) runs GRASP inference on exactly the ingested time range.
 

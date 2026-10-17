@@ -75,12 +75,15 @@ def socket_node(addr):
 
 
 def normalize_event(event):
-    normalized = {}
+    """Unescape (twice) HTML entities in string fields, in place.
+
+    Only strings containing "&" can hold an entity; for all others html.unescape is a no-op,
+    so they are skipped (most fields of most events).
+    """
     for key, value in event.items():
-        if isinstance(value, str):
-            value = html.unescape(html.unescape(value))
-        normalized[key] = value
-    return normalized
+        if isinstance(value, str) and "&" in value:
+            event[key] = html.unescape(html.unescape(value))
+    return event
 
 
 def clean_name(value):
@@ -148,12 +151,14 @@ def extract_process_identity(event):
             tid = int(tid)
         except (TypeError, ValueError):
             tid = None
+    # Most events (read/write/...) carry none of these fields; the substring checks skip
+    # the regexes, which could not match without them.
     return {
         "tid": tid,
-        "pid": extract_numeric_field(info, "pid"),
-        "ptid": extract_numeric_field(info, "ptid"),
-        "exe": extract_exe(info),
-        "comm": extract_comm(info),
+        "pid": extract_numeric_field(info, "pid") if "pid=" in info else None,
+        "ptid": extract_numeric_field(info, "ptid") if "ptid=" in info else None,
+        "exe": extract_exe(info) if "exe=" in info else None,
+        "comm": extract_comm(info) if "comm=" in info else None,
         "proc_name": event.get("proc.name"),
     }
 
@@ -361,57 +366,61 @@ def update_process_from_event(processes, event):
 
 
 # ------------------------------
-# Pass 1: collect all nodes
+# Single pass: nodes, process metadata and edge candidates
 # ------------------------------
+#
+# Edges may only be written for "resolved" processes (an executable is known), which is
+# only certain after the last event. Instead of reading all events a second time, every
+# event is processed once: node/process bookkeeping and fd tracking as before, and each edge
+# is stored as a candidate together with the process tid(s) it needs. After the last event
+# the candidates are filtered by the resolved processes (keeping their order), which gives
+# exactly the edges of the former two-pass version.
 
 
-def collect_nodes(input_dir, processes=None):
-    """Pass 1. processes: state carried over from earlier batches (updated in place)."""
-    nodes = {}
-    processes = {} if processes is None else processes
-    event_count = 0
+PROCESS_EVENT_TYPES = frozenset(
+    ("clone", "fork", "vfork", "execve", "execveat", "exit", "exit_group")
+)
 
-    for event in iter_all_events(input_dir):
-        event_count += 1
-        evt_type = event.get("evt.type")
-        evt_info = event.get("evt.info", "")
-        timestamp = event.get("evt.outputtime")
-        tid = update_process_from_event(processes, event)
-        if tid is None:
-            continue
 
-        if evt_type in ("clone", "fork", "vfork"):
-            child_tid = extract_numeric_field(evt_info, "res")
-            if child_tid is not None and child_tid > 0:
-                ensure_process(processes, child_tid)
-            continue
+def update_nodes_and_processes(event, tid, nodes, processes, resource, succeeded):
+    """Node/process bookkeeping of one event (formerly pass 1).
 
-        if evt_type in ("execve", "execveat"):
-            executable = extract_exe(evt_info)
-            if executable and event_succeeded(evt_info):
-                ensure_process(processes, tid)["exe"] = executable
-                add_node(nodes, file_node(executable), "file", executable)
-            continue
+    resource / succeeded: extract_resource() and event_succeeded() of the event's evt.info,
+    computed once per event by the caller.
+    """
+    evt_type = event.get("evt.type")
+    evt_info = event.get("evt.info", "")
+    timestamp = event.get("evt.outputtime")
 
-        if evt_type in ("exit", "exit_group"):
-            process = ensure_process(processes, tid)
-            process["exited"] = "true"
-            process["exit_timestamp"] = timestamp
-            continue
+    if evt_type in ("clone", "fork", "vfork"):
+        child_tid = extract_numeric_field(evt_info, "res")
+        if child_tid is not None and child_tid > 0:
+            ensure_process(processes, child_tid)
+        return
 
-        if event_succeeded(evt_info):
-            _, resource_type, resource_value = extract_resource(evt_info)
-            if resource_type == "file" and resource_value:
-                add_node(nodes, file_node(resource_value), "file", resource_value)
-            elif resource_type == "socket" and resource_value:
-                add_node(nodes, socket_node(resource_value), "socket", resource_value)
+    if evt_type in ("execve", "execveat"):
+        executable = extract_exe(evt_info)
+        if executable and succeeded:
+            ensure_process(processes, tid)["exe"] = executable
+            add_node(nodes, file_node(executable), "file", executable)
+        return
 
-        if event_count % PROGRESS_INTERVAL == 0:
-            print(
-                f"[*] Pass 1 events: {event_count:,}, nodes: {len(nodes):,}, "
-                f"processes: {len(processes):,}"
-            )
+    if evt_type in ("exit", "exit_group"):
+        process = ensure_process(processes, tid)
+        process["exited"] = "true"
+        process["exit_timestamp"] = timestamp
+        return
 
+    if succeeded:
+        _, resource_type, resource_value = resource
+        if resource_type == "file" and resource_value:
+            add_node(nodes, file_node(resource_value), "file", resource_value)
+        elif resource_type == "socket" and resource_value:
+            add_node(nodes, socket_node(resource_value), "socket", resource_value)
+
+
+def add_process_nodes(nodes, processes):
+    """Process nodes for every process with a known executable; returns their tids."""
     resolved_process_tids = set()
     for tid, process in processes.items():
         executable = process.get("exe")
@@ -435,13 +444,8 @@ def collect_nodes(input_dir, processes=None):
             },
         )
         resolved_process_tids.add(tid)
+    return resolved_process_tids
 
-    return nodes, resolved_process_tids, event_count
-
-
-# ------------------------------
-# Pass 2: stream edges to CSV
-# ------------------------------
 
 EDGE_FIELDNAMES = [
     "src",
@@ -477,6 +481,87 @@ def make_edge(src, dst, action, timestamp, event, resource_value=None):
     }
 
 
+def edge_candidates(event, tid, fd_table, resource, succeeded):
+    """(edge, required tids) of one event, updating fd_table (formerly pass 2).
+
+    Same rules as before, except that the "process is resolved" check is left to the
+    caller: an edge is kept only if all its required tids turn out to be resolved.
+    """
+    evt_type = event.get("evt.type")
+    evt_info = event.get("evt.info", "")
+    direction = event.get("evt.dir")
+    timestamp = event.get("evt.outputtime")
+
+    fd_table.setdefault(tid, {})
+    process_id = proc_node(tid)
+
+    if evt_type in ("clone", "fork", "vfork"):
+        child_tid = extract_numeric_field(evt_info, "res")
+        if child_tid is not None and child_tid > 0:
+            fd_table.setdefault(child_tid, dict(fd_table.get(tid, {})))
+            edge = make_edge(
+                proc_node(tid), proc_node(child_tid), evt_type, timestamp, event, str(child_tid)
+            )
+            return [(edge, (tid, child_tid))]
+        return []
+
+    if evt_type in ("execve", "execveat"):
+        executable = extract_exe(evt_info)
+        if executable and succeeded:
+            edge = make_edge(process_id, file_node(executable), "exec", timestamp, event, executable)
+            return [(edge, (tid,))]
+        return []
+
+    if evt_type in ("exit", "exit_group"):
+        return []
+
+    fd, resource_type, resource_value = resource
+    if fd is not None and resource_type and resource_value:
+        fd_table[tid][fd] = (resource_type, resource_value)
+    if fd is not None and (not resource_type or not resource_value):
+        stored = fd_table[tid].get(fd)
+        if stored:
+            resource_type, resource_value = stored
+
+    edge_spec = None
+    if resource_type == "file" and resource_value:
+        resource_id = file_node(resource_value)
+        if evt_type == "read" and direction == "<":
+            edge_spec = (resource_id, process_id, "read")
+        elif evt_type == "write" and direction == "<":
+            edge_spec = (process_id, resource_id, "write")
+        elif evt_type in ("open", "openat") and direction == "<":
+            edge_spec = (process_id, resource_id, "open")
+        elif evt_type == "close" and direction == "<":
+            edge_spec = (process_id, resource_id, "close")
+    elif resource_type == "socket" and resource_value:
+        resource_id = socket_node(resource_value)
+        if evt_type == "recvfrom" and direction == "<":
+            edge_spec = (resource_id, process_id, "recv")
+        elif evt_type == "sendto" and direction == "<":
+            edge_spec = (process_id, resource_id, "send")
+        elif evt_type == "read" and direction == "<":
+            edge_spec = (resource_id, process_id, "recv")
+        elif evt_type == "write" and direction == "<":
+            edge_spec = (process_id, resource_id, "send")
+        elif evt_type == "connect" and direction == "<":
+            edge_spec = (process_id, resource_id, "connect")
+        elif evt_type in ("accept", "accept4") and direction == "<":
+            edge_spec = (resource_id, process_id, "accept")
+        elif evt_type == "close" and direction == "<":
+            edge_spec = (process_id, resource_id, "close")
+
+    candidates = []
+    if edge_spec and succeeded:
+        edge = make_edge(edge_spec[0], edge_spec[1], edge_spec[2], timestamp, event, resource_value)
+        candidates.append((edge, (tid,)))
+
+    if evt_type == "close" and fd is not None:
+        fd_table[tid].pop(fd, None)
+
+    return candidates
+
+
 def open_dedup_database(directory):
     with tempfile.NamedTemporaryFile(
         prefix="sysdig_edge_dedup_",
@@ -493,131 +578,60 @@ def open_dedup_database(directory):
     return connection, path
 
 
-def write_edge_if_new(writer, dedup_connection, edge):
+def is_new_edge(dedup_connection, edge):
     key = json.dumps(
         [edge["src"], edge["dst"], edge["action"], edge["timestamp"], edge["evt_num"]],
         ensure_ascii=False,
         separators=(",", ":"),
     )
     cursor = dedup_connection.execute("INSERT OR IGNORE INTO seen(edge_key) VALUES (?)", (key,))
-    if cursor.rowcount == 0:
-        return False
-    writer.writerow(edge)
-    return True
+    return cursor.rowcount != 0
 
 
-def process_and_write_edges(input_dir, resolved_process_tids, edges_file, fd_table=None):
-    """Pass 2. fd_table: open fds carried over from earlier batches (updated in place)."""
+def process_events(input_dir, edges_file, processes=None, fd_table=None):
+    """Read all events once; write edges_file and return (nodes, resolved tids, events, edges).
+
+    processes / fd_table: state carried over from earlier batches (updated in place).
+    Duplicate edges are dropped at their first occurrence; since an edge's key contains
+    its processes, a duplicate is kept or filtered exactly like its first occurrence.
+    """
+    processes = {} if processes is None else processes
     fd_table = {} if fd_table is None else fd_table
-    edge_count = 0
+    nodes = {}
     event_count = 0
-    dedup_connection, dedup_path = open_dedup_database(Path(edges_file).parent)
+    candidate_count = 0
+    edges_file = Path(edges_file)
+    candidates_file = edges_file.with_name(edges_file.name + ".candidates")
+    dedup_connection, dedup_path = open_dedup_database(edges_file.parent)
 
     try:
-        with Path(edges_file).open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=EDGE_FIELDNAMES, extrasaction="ignore")
-            writer.writeheader()
-
+        with candidates_file.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
             for event in iter_all_events(input_dir):
                 event_count += 1
-                evt_type = event.get("evt.type")
-                evt_info = event.get("evt.info", "")
-                direction = event.get("evt.dir")
-                timestamp = event.get("evt.outputtime")
-                tid = extract_process_identity(event)["tid"]
+                tid = update_process_from_event(processes, event)
                 if tid is None:
                     continue
-
-                fd_table.setdefault(tid, {})
-                process_id = proc_node(tid)
-
-                if evt_type in ("clone", "fork", "vfork"):
-                    child_tid = extract_numeric_field(evt_info, "res")
-                    if child_tid is not None and child_tid > 0:
-                        fd_table.setdefault(child_tid, dict(fd_table.get(tid, {})))
-                        if tid in resolved_process_tids and child_tid in resolved_process_tids:
-                            edge = make_edge(
-                                proc_node(tid),
-                                proc_node(child_tid),
-                                evt_type,
-                                timestamp,
-                                event,
-                                str(child_tid),
-                            )
-                            edge_count += write_edge_if_new(writer, dedup_connection, edge)
-                    continue
-
-                if evt_type in ("execve", "execveat"):
-                    executable = extract_exe(evt_info)
-                    if executable and tid in resolved_process_tids and event_succeeded(evt_info):
-                        edge = make_edge(
-                            process_id,
-                            file_node(executable),
-                            "exec",
-                            timestamp,
-                            event,
-                            executable,
+                evt_info = event.get("evt.info", "")
+                succeeded = event_succeeded(evt_info)
+                resource = (
+                    None if event.get("evt.type") in PROCESS_EVENT_TYPES else extract_resource(evt_info)
+                )
+                update_nodes_and_processes(event, tid, nodes, processes, resource, succeeded)
+                for edge, required in edge_candidates(event, tid, fd_table, resource, succeeded):
+                    if is_new_edge(dedup_connection, edge):
+                        required_2 = required[1] if len(required) > 1 else ""
+                        writer.writerow(
+                            [required[0], required_2, *(edge[f] for f in EDGE_FIELDNAMES)]
                         )
-                        edge_count += write_edge_if_new(writer, dedup_connection, edge)
-                    continue
-
-                if evt_type in ("exit", "exit_group"):
-                    continue
-
-                fd, resource_type, resource_value = extract_resource(evt_info)
-                if fd is not None and resource_type and resource_value:
-                    fd_table[tid][fd] = (resource_type, resource_value)
-                if fd is not None and (not resource_type or not resource_value):
-                    stored = fd_table[tid].get(fd)
-                    if stored:
-                        resource_type, resource_value = stored
-
-                edge_spec = None
-                if resource_type == "file" and resource_value:
-                    resource_id = file_node(resource_value)
-                    if evt_type == "read" and direction == "<":
-                        edge_spec = (resource_id, process_id, "read")
-                    elif evt_type == "write" and direction == "<":
-                        edge_spec = (process_id, resource_id, "write")
-                    elif evt_type in ("open", "openat") and direction == "<":
-                        edge_spec = (process_id, resource_id, "open")
-                    elif evt_type == "close" and direction == "<":
-                        edge_spec = (process_id, resource_id, "close")
-                elif resource_type == "socket" and resource_value:
-                    resource_id = socket_node(resource_value)
-                    if evt_type == "recvfrom" and direction == "<":
-                        edge_spec = (resource_id, process_id, "recv")
-                    elif evt_type == "sendto" and direction == "<":
-                        edge_spec = (process_id, resource_id, "send")
-                    elif evt_type == "read" and direction == "<":
-                        edge_spec = (resource_id, process_id, "recv")
-                    elif evt_type == "write" and direction == "<":
-                        edge_spec = (process_id, resource_id, "send")
-                    elif evt_type == "connect" and direction == "<":
-                        edge_spec = (process_id, resource_id, "connect")
-                    elif evt_type in ("accept", "accept4") and direction == "<":
-                        edge_spec = (resource_id, process_id, "accept")
-                    elif evt_type == "close" and direction == "<":
-                        edge_spec = (process_id, resource_id, "close")
-
-                if edge_spec and tid in resolved_process_tids and event_succeeded(evt_info):
-                    edge = make_edge(
-                        edge_spec[0],
-                        edge_spec[1],
-                        edge_spec[2],
-                        timestamp,
-                        event,
-                        resource_value,
-                    )
-                    edge_count += write_edge_if_new(writer, dedup_connection, edge)
-
-                if evt_type == "close" and fd is not None:
-                    fd_table[tid].pop(fd, None)
+                        candidate_count += 1
 
                 if event_count % PROGRESS_INTERVAL == 0:
                     dedup_connection.commit()
-                    print(f"[*] Pass 2 events: {event_count:,}, edges written: {edge_count:,}")
-
+                    print(
+                        f"[*] Events: {event_count:,}, nodes: {len(nodes):,}, "
+                        f"processes: {len(processes):,}, edge candidates: {candidate_count:,}"
+                    )
         dedup_connection.commit()
     finally:
         dedup_connection.close()
@@ -626,7 +640,25 @@ def process_and_write_edges(input_dir, resolved_process_tids, edges_file, fd_tab
         except OSError:
             pass
 
-    return edge_count, event_count
+    resolved_process_tids = add_process_nodes(nodes, processes)
+    resolved = {str(tid) for tid in resolved_process_tids}
+
+    edge_count = 0
+    try:
+        with (
+            candidates_file.open(newline="", encoding="utf-8") as src,
+            edges_file.open("w", newline="", encoding="utf-8") as dst,
+        ):
+            writer = csv.writer(dst)
+            writer.writerow(EDGE_FIELDNAMES)
+            for row in csv.reader(src):
+                if row[0] in resolved and (row[1] == "" or row[1] in resolved):
+                    writer.writerow(row[2:])
+                    edge_count += 1
+    finally:
+        candidates_file.unlink(missing_ok=True)
+
+    return nodes, resolved_process_tids, event_count, edge_count
 
 
 # ------------------------------
@@ -714,26 +746,22 @@ def parse_events(input_dir, output_dir, state_file=None):
 
     processes, fd_table = load_state(state_file) if state_file else ({}, {})
 
-    print("[*] Pass 1: collecting nodes and process metadata")
-    nodes, resolved_process_tids, pass1_count = collect_nodes(input_dir, processes)
-    print(f"[*] Pass 1 events:       {pass1_count:,}")
+    print("[*] Single pass: nodes, process metadata and edges")
+    nodes, resolved_process_tids, event_count, edge_count = process_events(
+        input_dir, edges_file, processes, fd_table
+    )
+    print(f"[*] Events:              {event_count:,}")
     print(f"[*] Resolved processes:  {len(resolved_process_tids):,}")
     print(f"[*] Collected nodes:     {len(nodes):,}")
 
     save_nodes(nodes, nodes_file)
     print(f"[*] Nodes written: {len(nodes):,} -> {nodes_file}")
-
-    print("[*] Pass 2: streaming and deduplicating edges")
-    edge_count, pass2_count = process_and_write_edges(
-        input_dir, resolved_process_tids, edges_file, fd_table
-    )
-    print(f"[*] Pass 2 events: {pass2_count:,}")
     print(f"[*] Edges written: {edge_count:,} -> {edges_file}")
     print("[*] Provenance graph exported")
 
     if state_file:
         save_state(state_file, processes, fd_table)
-    return {"events": pass1_count, "nodes": len(nodes), "edges": edge_count}
+    return {"events": event_count, "nodes": len(nodes), "edges": edge_count}
 
 
 # ------------------------------

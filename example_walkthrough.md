@@ -205,7 +205,20 @@ Sysdig times are UTC. From then on, add `"run_inference": true` to the ingest ca
 batch is classified right after it is ingested, and `/jobs/<id>/report` and
 `/jobs/<id>/anomalies` show the result.
 
-## 10. Other useful calls and stopping
+## 10. Everything in the browser: GraphWatch console
+
+Instead of `curl`, all of the above also works in the browser:
+
+```bash
+docker compose --profile console up -d
+```
+
+Open http://localhost:8502. **Run** has the forms with examples to prefill, **Jobs** shows the
+status and live log, **Results** shows the report with *Open in workbench*, and **Models** lists
+the trained models. See [README_setup_docker_compose.md](README_setup_docker_compose.md),
+section 8.
+
+## 11. Other useful calls and stopping
 
 ```bash
 curl -s $API/jobs -H "X-API-Key: $KEY" | jq '.[] | {id, type, status}'   # all jobs

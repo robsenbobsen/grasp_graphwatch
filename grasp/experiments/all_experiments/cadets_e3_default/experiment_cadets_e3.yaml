@@ -17,7 +17,7 @@ times:
 location_transformer:
   max_location_length: 100
   hidden_dim: 16
-  embedding_dim: 8 
+  embedding_dim: 32 # was 8; transformer_fix study: -52% unique false alarms on cadets_e3
   num_layers: 2
   nhead: 4
   num_epochs: 10

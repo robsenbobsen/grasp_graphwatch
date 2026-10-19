@@ -88,6 +88,8 @@ def main() -> None:
         autoencoder_num_epochs=config.LocationTransformerConfig.NUM_EPOCHS,
         autoencoder_patience=config.LocationTransformerConfig.PATIENCE,
         autoencoder_batch_size=config.LocationTransformerConfig.BATCH_SIZE,
+        autoencoder_num_layers=config.LocationTransformerConfig.NUM_LAYERS,
+        autoencoder_nhead=config.LocationTransformerConfig.NHEAD,
         location_embedding_model_type=(config.LocationTransformerConfig.MODEL_TYPE),
         word2vec_window_size=(config.LocationTransformerConfig.WORD2VEC_WINDOW_SIZE),
         word2vec_min_count=config.LocationTransformerConfig.WORD2VEC_MIN_COUNT,

@@ -115,6 +115,8 @@ def _graph_manager(
         autoencoder_num_epochs=ltc.NUM_EPOCHS,
         autoencoder_patience=ltc.PATIENCE,
         autoencoder_batch_size=ltc.BATCH_SIZE,
+        autoencoder_num_layers=ltc.NUM_LAYERS,
+        autoencoder_nhead=ltc.NHEAD,
         autoencoder_model_file_path=str(encoder_path),
         location_embedding_model_type=ltc.MODEL_TYPE,
         word2vec_window_size=ltc.WORD2VEC_WINDOW_SIZE,

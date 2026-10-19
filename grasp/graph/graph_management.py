@@ -38,6 +38,8 @@ class GraphManager:
         autoencoder_num_epochs: int = 20,
         autoencoder_patience: int = 5,
         autoencoder_batch_size: int = 32,
+        autoencoder_num_layers: int = 2,
+        autoencoder_nhead: int = 4,
         autoencoder_model_file_path: str = "./models/location_autoencoder.pt",
         location_embedding_model_type: str = "transformer",
         word2vec_window_size: int = 2,
@@ -84,6 +86,8 @@ class GraphManager:
         self.num_epochs = autoencoder_num_epochs
         self.patience = autoencoder_patience
         self.batch_size = autoencoder_batch_size
+        self.num_layers = autoencoder_num_layers
+        self.nhead = autoencoder_nhead
         self.model_file_path = autoencoder_model_file_path
         self.location_embedding_model_type = location_embedding_model_type
         self.word2vec_window_size = word2vec_window_size
@@ -162,6 +166,8 @@ class GraphManager:
             locations=self.graph_storage.unique_train_locations,
             device=self.autoencoder_device,
             model_file_path=Path(self.model_file_path),
+            num_layers=self.num_layers,
+            nhead=self.nhead,
         )
 
     def extend_graphs(

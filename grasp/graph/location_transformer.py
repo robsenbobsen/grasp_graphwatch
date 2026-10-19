@@ -8,9 +8,19 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 
-from grasp.config import LocationTransformerConfig
+from grasp import config
 
 logger = logging.getLogger(__name__)
+
+# Reserved token ids; characters start after them.
+PAD_IDX = 0
+UNK_IDX = 1
+BOS_IDX = 2
+NUM_SPECIAL_TOKENS = 3
+
+
+def location_vocab_size() -> int:
+    return len(config.LocationTransformerConfig.CHARS) + NUM_SPECIAL_TOKENS
 
 
 def _tokenize_location(location: str) -> list[str]:
@@ -19,46 +29,41 @@ def _tokenize_location(location: str) -> list[str]:
 
 
 class PositionalEncoding(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        max_len: int = LocationTransformerConfig.POS_ENC_MAX_LEN,
-    ):
+    def __init__(self, d_model: int, max_len: int | None = None):
         super().__init__()
+        cfg = config.LocationTransformerConfig
+        max_len = max_len or cfg.POS_ENC_MAX_LEN
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2).float()
-            * (
-                -torch.log(torch.tensor(LocationTransformerConfig.POS_ENC_DIV_TERM_HYPERPARAM))
-                / d_model
-            )
+            * (-torch.log(torch.tensor(cfg.POS_ENC_DIV_TERM_HYPERPARAM)) / d_model)
         )
 
         pe = torch.zeros(max_len, d_model)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
 
-        # Store as batch-first for simpler broadcasting
-        self.register_buffer("pe", pe.unsqueeze(0).transpose(0, 1))
+        # (1, max_len, d_model) to broadcast over batch-first input
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.size(0)
+        seq_len = x.size(1)
         pe_buffer = getattr(self, "pe")  # noqa: B009
-        return x + pe_buffer[:seq_len, :]
+        return x + pe_buffer[:, :seq_len, :]
 
 
 class LocationDataset(Dataset):
     def __init__(
         self,
         locations: list[str],
-        max_length: int = LocationTransformerConfig.MAX_LOCATION_LENGTH,
-        padding_idx: int = LocationTransformerConfig.PADDING_CHAR,
-        chars=LocationTransformerConfig.CHARS,
+        max_length: int | None = None,
+        chars: str | None = None,
         unique_locations: bool = True,
     ) -> None:
-        self.max_length = max_length
-        self.padding_idx = padding_idx
-        self.char2idx = {char: idx for idx, char in enumerate(chars)}
+        cfg = config.LocationTransformerConfig
+        self.max_length = max_length or cfg.MAX_LOCATION_LENGTH
+        chars = chars or cfg.CHARS
+        self.char2idx = {char: idx + NUM_SPECIAL_TOKENS for idx, char in enumerate(chars)}
         if unique_locations:
             self.locations: list[str] = list(set(locations))
         else:
@@ -68,14 +73,20 @@ class LocationDataset(Dataset):
         return len(self.locations)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        location = self.locations[idx][: self.max_length]
-        idx_sequence = [self.char2idx.get(char, 0) for char in location]
-        # Pad to max_length
-        idx_sequence += [self.padding_idx] * (self.max_length - len(idx_sequence))
+        # BOS keeps every sequence non-empty (e.g. nodes without a location)
+        location = self.locations[idx][: self.max_length - 1]
+        idx_sequence = [BOS_IDX] + [self.char2idx.get(char, UNK_IDX) for char in location]
+        idx_sequence += [PAD_IDX] * (self.max_length - len(idx_sequence))
         return torch.tensor(idx_sequence, dtype=torch.long)
 
 
 class TransformerAutoencoder(nn.Module):
+    """Character-level autoencoder whose decoder only sees the pooled location embedding.
+
+    The decoder queries are positional encodings and its memory is the single pooled
+    vector, so reconstruction has to go through the embedding that is used as feature.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -87,30 +98,33 @@ class TransformerAutoencoder(nn.Module):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.input_dim = input_dim
-        self.embedding = nn.Embedding(self.input_dim, self.embedding_dim)
+        self.embedding = nn.Embedding(self.input_dim, self.embedding_dim, padding_idx=PAD_IDX)
         self.pos_encoder = PositionalEncoding(self.embedding_dim)
         self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(self.embedding_dim, nhead, hidden_dim),
+            nn.TransformerEncoderLayer(self.embedding_dim, nhead, hidden_dim, batch_first=True),
             num_layers,
+            enable_nested_tensor=False,
         )
         self.decoder = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(self.embedding_dim, nhead, hidden_dim),
+            nn.TransformerDecoderLayer(self.embedding_dim, nhead, hidden_dim, batch_first=True),
             num_layers,
         )
         self.output_layer = nn.Linear(self.embedding_dim, self.input_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        embed = self.embedding(x) * (self.embedding_dim**0.5)
-        encoded = self.pos_encoder(embed)
-        memory = self.encoder(encoded)
-        decoded = self.decoder(encoded, memory)
+        pooled = self.encode_sequences(x)
+        queries = self.pos_encoder(torch.zeros_like(self.embedding(x)))
+        decoded = self.decoder(queries, pooled.unsqueeze(1))
         return self.output_layer(decoded)
 
     def encode_sequences(self, sequences: torch.Tensor) -> torch.Tensor:
+        padding_mask = sequences == PAD_IDX
         embed = self.embedding(sequences) * (self.embedding_dim**0.5)
         encoded = self.pos_encoder(embed)
-        memory = self.encoder(encoded)
-        return memory.mean(dim=1)
+        memory = self.encoder(encoded, src_key_padding_mask=padding_mask)
+        # Mean over real tokens only
+        keep = (~padding_mask).unsqueeze(-1).float()
+        return (memory * keep).sum(dim=1) / keep.sum(dim=1)
 
     def fit(
         self,
@@ -118,10 +132,11 @@ class TransformerAutoencoder(nn.Module):
         device: torch.device,
         num_epochs: int,
         patience: int,
-        lr: float = LocationTransformerConfig.LEARNING_RATE,
+        lr: float | None = None,
     ) -> None:
+        lr = lr or config.LocationTransformerConfig.LEARNING_RATE
         optimizer = optim.Adam(self.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
         best_loss, epochs_no_improve = float("inf"), 0
 
         logger.info(
@@ -191,7 +206,7 @@ class TransformerAutoencoder(nn.Module):
     ) -> "TransformerAutoencoder":
         """Load model weights from disk."""
 
-        resolved_device = device or torch.device(LocationTransformerConfig.DEVICE)
+        resolved_device = device or torch.device(config.LocationTransformerConfig.DEVICE)
         model = cls(input_dim, embedding_dim, hidden_dim, num_layers, nhead).to(resolved_device)
         state_dict = torch.load(path, map_location=resolved_device)
         model.load_state_dict(state_dict)
@@ -354,11 +369,7 @@ def _embed_locations(
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
             batch = batch.to(device)
-            # Use the model's embedding dimension for scaling
-            embedded = model.embedding(batch) * (model.embedding_dim**0.5)
-            encoded = model.pos_encoder(embedded)
-            memory = model.encoder(encoded)
-            all_embeddings.append(memory.mean(dim=1).cpu().numpy())
+            all_embeddings.append(model.encode_sequences(batch).cpu().numpy())
 
             if batch_idx % 50 == 0:  # Log progress every 50 batches
                 logger.debug(
@@ -381,10 +392,12 @@ def train_transformer_autoencoder_model(
     locations: list[str],
     model_file_path: Path,
     device: torch.device,
+    num_layers: int = 2,
+    nhead: int = 4,
 ) -> TransformerAutoencoder:
     dataset = LocationDataset(locations)
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    input_dim: int = len(LocationTransformerConfig.CHARS)
+    input_dim: int = location_vocab_size()
 
     logger.info(
         ("Training transformer autoencoder (|paths|=%d, embedding_dim=%d) on %s"),
@@ -393,9 +406,9 @@ def train_transformer_autoencoder_model(
         device,
     )
 
-    model: TransformerAutoencoder = TransformerAutoencoder(input_dim, embedding_dim, hidden_dim).to(
-        device
-    )
+    model: TransformerAutoencoder = TransformerAutoencoder(
+        input_dim, embedding_dim, hidden_dim, num_layers, nhead
+    ).to(device)
     model.fit(
         train_loader,
         device,
@@ -501,7 +514,7 @@ def build_location_embeddings_from_file(
     if not model_file_path.exists():
         raise FileNotFoundError(f"Model file {model_file_path} does not exist.")
 
-    input_dim = len(LocationTransformerConfig.CHARS)
+    input_dim = location_vocab_size()
     model = TransformerAutoencoder.load(
         model_file_path,
         input_dim,
